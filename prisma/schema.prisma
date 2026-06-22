@@ -1,0 +1,856 @@
+// ======================================================
+// prisma/schema.prisma
+// ELEEVEON SCHOOLS - FULL DROP-IN PLATFORM-READY SCHEMA
+// ======================================================
+// Purpose:
+// - Keeps your current auth, account, sync, billing and permission models.
+// - Adds backend-only platform infrastructure for audit logs, API clients,
+//   API keys, webhooks, integration mapping, storage usage, background jobs,
+//   notification delivery logs, and payment provider events.
+// - Designed to work with an offline-first Dexie app where most school records
+//   live inside SyncRecord payloads and are linked by local Dexie IDs.
+// ======================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ======================================================
+// ACCOUNT / TENANT
+// ======================================================
+
+model Account {
+  id        String   @id @default(uuid())
+  name      String
+  email     String?  @unique
+  phone     String?
+
+  // Account-level organization profile and branding.
+  // Media fields store references only; image/blob data stays in the app media system.
+  website       String?
+  address       String?
+  description   String?
+  logoMediaId   String?
+  photoMediaId  String?
+  bannerMediaId String?
+
+  country   String?  @default("GH")
+  currency  String?  @default("GHS")
+  status    String   @default("active") // active | suspended | closed
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users              AppUser[]
+  memberships        UserMembership[]
+  records            SyncRecord[]
+  subscription       AccountSubscription?
+  billingEvents      BillingEvent[]
+  invoices           Invoice[]
+  payments           AppPayment[]
+  permissionRules    PermissionRule[]
+
+  apiClients         ApiClient[]
+  apiKeys            ApiKey[]
+  webhooks           Webhook[]
+  webhookLogs        WebhookLog[]
+  auditLogs          AuditLog[]
+  storageUsage       StorageUsage?
+  backgroundJobs     BackgroundJob[]
+  integrationMappings IntegrationMapping[]
+  notificationLogs   NotificationDeliveryLog[]
+  paymentEvents      PaymentProviderEvent[]
+  featureFlags       AccountFeatureFlag[]
+  systemSettings     AccountSystemSetting[]
+
+  @@index([email])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ======================================================
+// AUTH USERS
+// ======================================================
+
+model AppUser {
+  id        String  @id @default(uuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  fullName     String
+  email        String @unique
+  phone        String?
+  passwordHash String
+
+  // Fallback/default role. Keep this so your current app does not break.
+  role         String @default("super_admin") // developer | platform_team | super_admin | admin | branch_admin | accountant | teacher | student | parent
+  active       Boolean @default(true)
+  lastLoginAt  DateTime?
+
+  // Optional security/account recovery fields.
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  passwordChangedAt DateTime?
+  failedLoginCount Int @default(0)
+  lockedUntil DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships UserMembership[]
+  sessions    UserSession[]
+
+  @@index([accountId])
+  @@index([email])
+  @@index([role])
+  @@index([active])
+  @@index([lastLoginAt])
+}
+
+model UserSession {
+  id String @id @default(uuid())
+
+  accountId String
+  userId    String
+  user      AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  refreshTokenHash String?
+  deviceId         String?
+  deviceName       String?
+  ipAddress        String?
+  userAgent        String?
+
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([userId])
+  @@index([deviceId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+model UserMembership {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  role String // super_admin | admin | branch_admin | accountant | teacher | student | parent
+
+  // These are local Dexie IDs because schools/branches are stored in synced payloads.
+  schoolId Int?
+  branchId Int?
+
+  teacherLocalId Int?
+  studentLocalId Int?
+  parentLocalId  Int?
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([userId])
+  @@index([accountId, role])
+  @@index([accountId, schoolId, branchId])
+  @@index([teacherLocalId])
+  @@index([studentLocalId])
+  @@index([parentLocalId])
+  @@index([active])
+}
+
+model PermissionRule {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  moduleKey   String
+  moduleLabel String
+
+  owner      String @default("yes")
+  admin      String @default("no")
+  branch     String @default("no")
+  teacher    String @default("no")
+  student    String @default("no")
+  parent     String @default("no")
+  accountant String @default("no")
+  developer  String @default("no")
+
+  locked Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, moduleKey])
+  @@index([accountId])
+  @@index([locked])
+}
+
+// ======================================================
+// OFFLINE-FIRST SYNC STORAGE
+// ======================================================
+
+model SyncRecord {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  tableName String
+  localId   Int?
+  cloudId   String?
+  deviceId  String?
+
+  version   Int     @default(1)
+  updatedAt BigInt
+  isDeleted Boolean @default(false)
+
+  payload Json
+
+  createdAt DateTime @default(now())
+
+  // A stable lookup for pushed local records. This is the safest uniqueness rule
+  // for local-first tables where a device may send localId before cloudId exists.
+  @@unique([accountId, tableName, localId, deviceId])
+  @@index([accountId])
+  @@index([accountId, tableName])
+  @@index([accountId, tableName, updatedAt])
+  @@index([accountId, tableName, cloudId])
+  @@index([deviceId])
+  @@index([cloudId])
+  @@index([isDeleted])
+}
+
+model SyncDevice {
+  id String @id @default(uuid())
+
+  accountId String
+  userId    String?
+  deviceId  String
+  name      String?
+  platform  String? // web | android | ios | desktop
+
+  lastSeenAt DateTime?
+  lastPushAt DateTime?
+  lastPullAt DateTime?
+  active     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, deviceId])
+  @@index([accountId])
+  @@index([userId])
+  @@index([active])
+  @@index([lastSeenAt])
+}
+
+model SyncConflict {
+  id String @id @default(uuid())
+
+  accountId String
+  tableName String
+  localId   Int?
+  cloudId   String?
+  deviceId  String?
+
+  conflictType String // version_conflict | deleted_conflict | validation_error | ownership_mismatch
+  status       String @default("open") // open | resolved | ignored
+  severity     String @default("medium") // low | medium | high | critical
+
+  serverPayload Json?
+  clientPayload Json?
+  resolutionPayload Json?
+  note String?
+
+  detectedAt DateTime @default(now())
+  resolvedAt DateTime?
+  resolvedByUserId String?
+
+  @@index([accountId])
+  @@index([accountId, tableName])
+  @@index([status])
+  @@index([severity])
+  @@index([detectedAt])
+}
+
+// ======================================================
+// SUBSCRIPTIONS / SAAS BILLING
+// ======================================================
+
+model SubscriptionPlan {
+  id String @id @default(uuid())
+
+  name        String
+  code        String @unique // trial | starter | standard | premium | enterprise
+  description String?
+
+  currency String @default("GHS")
+  priceMonthly Int @default(0)
+  priceYearly  Int @default(0)
+
+  maxSchools   Int?
+  maxBranches  Int?
+  maxUsers     Int?
+  maxStudents  Int?
+  maxTeachers  Int?
+  maxStorageMb Int?
+  maxApiCallsPerMonth Int?
+
+  offlineSync       Boolean @default(true)
+  cloudBackup       Boolean @default(false)
+  reports           Boolean @default(true)
+  finance           Boolean @default(false)
+  parentPortal      Boolean @default(false)
+  studentPortal     Boolean @default(false)
+  teacherPortal     Boolean @default(true)
+  advancedAnalytics Boolean @default(false)
+  apiAccess         Boolean @default(false)
+  webhooks          Boolean @default(false)
+  prioritySupport   Boolean @default(false)
+
+  features Json?
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions AccountSubscription[]
+
+  @@index([code])
+  @@index([active])
+}
+
+model AccountSubscription {
+  id String @id @default(uuid())
+
+  accountId String @unique
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  planId String
+  plan   SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  status       String @default("trial") // trial | active | past_due | expired | cancelled | suspended
+  billingCycle String @default("monthly") // monthly | yearly | manual
+
+  trialStartedAt DateTime?
+  trialEndsAt    DateTime?
+
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  nextBillingDate    DateTime?
+
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices Invoice[]
+  payments AppPayment[]
+
+  @@index([planId])
+  @@index([status])
+  @@index([currentPeriodEnd])
+  @@index([nextBillingDate])
+}
+
+model Invoice {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  subscriptionId String?
+  subscription   AccountSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  invoiceNumber String @unique
+  currency      String @default("GHS")
+
+  subtotal Int
+  discount Int @default(0)
+  tax      Int @default(0)
+  total    Int
+  amountPaid Int @default(0)
+  balance    Int @default(0)
+
+  status String @default("draft") // draft | issued | part_paid | paid | void | overdue | cancelled
+  issueDate DateTime @default(now())
+  dueDate DateTime?
+  paidAt  DateTime?
+
+  note String?
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments AppPayment[]
+
+  @@index([accountId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([issueDate])
+  @@index([dueDate])
+}
+
+model AppPayment {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  subscriptionId String?
+  subscription   AccountSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  amount   Int
+  currency String @default("GHS")
+
+  method   String // momo | card | bank | cash | manual
+  provider String? // paystack | hubtel | flutterwave | manual
+
+  status String @default("pending") // pending | processing | paid | failed | refunded | cancelled
+
+  providerReference String?
+  accessCode         String?
+  authorizationUrl   String?
+  receiptNumber      String?
+  payerName          String?
+  payerPhone         String?
+  payerEmail         String?
+
+  paidAt DateTime?
+  failedAt DateTime?
+  cancelledAt DateTime?
+  note   String?
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  providerEvents PaymentProviderEvent[]
+
+  @@index([accountId])
+  @@index([subscriptionId])
+  @@index([invoiceId])
+  @@index([status])
+  @@index([method])
+  @@index([provider])
+  @@index([providerReference])
+  @@index([paidAt])
+}
+
+model PaymentProviderEvent {
+  id String @id @default(uuid())
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  paymentId String?
+  payment   AppPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  provider String // paystack | hubtel | flutterwave | manual
+  eventType String
+  providerReference String?
+
+  rawPayload Json
+  processed Boolean @default(false)
+  processedAt DateTime?
+  error String?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+  @@index([paymentId])
+  @@index([provider])
+  @@index([eventType])
+  @@index([providerReference])
+  @@index([processed])
+  @@index([createdAt])
+}
+
+model BillingEvent {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  type     String // subscription_created | payment_received | plan_changed | expired | suspended
+  message  String
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ======================================================
+// PLATFORM API / INTEGRATIONS
+// ======================================================
+
+model ApiClient {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  clientType  String @default("internal") // internal | partner | school_app | learn_app | business_app | external
+
+  allowedOrigins Json?
+  allowedIps     Json?
+  scopes         Json?
+
+  active Boolean @default(true)
+  lastUsedAt DateTime?
+
+  createdByUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  apiKeys ApiKey[]
+  webhooks Webhook[]
+
+  @@index([accountId])
+  @@index([clientType])
+  @@index([active])
+  @@index([lastUsedAt])
+}
+
+model ApiKey {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  clientId String
+  client   ApiClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  name      String
+  keyPrefix String
+  keyHash   String @unique
+  scopes    Json?
+
+  active Boolean @default(true)
+  expiresAt DateTime?
+  lastUsedAt DateTime?
+  revokedAt DateTime?
+  revokedByUserId String?
+
+  createdByUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([clientId])
+  @@index([keyPrefix])
+  @@index([active])
+  @@index([expiresAt])
+  @@index([lastUsedAt])
+}
+
+model Webhook {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  clientId String?
+  client   ApiClient? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  name String
+  url  String
+  secretHash String?
+
+  events Json // e.g. ["student.created", "payment.paid", "report.published"]
+  active Boolean @default(true)
+
+  maxRetries Int @default(3)
+  timeoutSeconds Int @default(20)
+  lastTriggeredAt DateTime?
+
+  createdByUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  logs WebhookLog[]
+
+  @@index([accountId])
+  @@index([clientId])
+  @@index([active])
+  @@index([lastTriggeredAt])
+}
+
+model WebhookLog {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  webhookId String?
+  webhook   Webhook? @relation(fields: [webhookId], references: [id], onDelete: SetNull)
+
+  eventType String
+  targetUrl String
+  requestPayload Json?
+  responseStatus Int?
+  responseBody String?
+  error String?
+
+  attempt Int @default(1)
+  status String @default("pending") // pending | success | failed | retrying
+  deliveredAt DateTime?
+  nextRetryAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+  @@index([webhookId])
+  @@index([eventType])
+  @@index([status])
+  @@index([createdAt])
+  @@index([nextRetryAt])
+}
+
+model IntegrationMapping {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  sourceSystem String // schools | learn | business | external
+  targetSystem String // schools | learn | business | external
+
+  entityType String // student | teacher | class | subject | classSubject | course | enrollment | assessment
+
+  localTable String?
+  localId    Int?
+  localCloudId String?
+
+  externalId String
+  externalRef String?
+  metadata Json?
+
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, sourceSystem, targetSystem, entityType, externalId])
+  @@index([accountId])
+  @@index([sourceSystem])
+  @@index([targetSystem])
+  @@index([entityType])
+  @@index([localTable, localId])
+  @@index([localCloudId])
+  @@index([active])
+}
+
+// ======================================================
+// AUDIT / SECURITY / OPERATIONS
+// ======================================================
+
+model AuditLog {
+  id String @id @default(uuid())
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  actorUserId String?
+  actorEmail  String?
+  actorRole   String?
+
+  action String // create | update | delete | login | logout | export | import | publish | approve | pay | sync
+  moduleKey String?
+  entityType String?
+  entityId   String?
+
+  schoolId Int?
+  branchId Int?
+
+  before Json?
+  after  Json?
+  metadata Json?
+
+  ipAddress String?
+  userAgent String?
+  deviceId  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+  @@index([actorUserId])
+  @@index([action])
+  @@index([moduleKey])
+  @@index([entityType, entityId])
+  @@index([schoolId, branchId])
+  @@index([createdAt])
+}
+
+model BackgroundJob {
+  id String @id @default(uuid())
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  type String // sync_push | sync_pull | report_generation | payment_verify | webhook_dispatch | backup | import | export
+  status String @default("queued") // queued | running | completed | failed | cancelled
+  priority Int @default(5)
+
+  payload Json?
+  result  Json?
+  error   String?
+
+  attempts Int @default(0)
+  maxAttempts Int @default(3)
+
+  scheduledAt DateTime?
+  startedAt DateTime?
+  completedAt DateTime?
+  failedAt DateTime?
+
+  createdByUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([type])
+  @@index([status])
+  @@index([priority])
+  @@index([scheduledAt])
+  @@index([createdAt])
+}
+
+model StorageUsage {
+  id String @id @default(uuid())
+
+  accountId String @unique
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  usedBytes BigInt @default(0)
+  usedMb    Int @default(0)
+  limitMb   Int?
+
+  imageBytes BigInt @default(0)
+  documentBytes BigInt @default(0)
+  backupBytes BigInt @default(0)
+  otherBytes BigInt @default(0)
+
+  lastCalculatedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([usedMb])
+  @@index([limitMb])
+}
+
+model AccountFeatureFlag {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  key String
+  enabled Boolean @default(false)
+  value Json?
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, key])
+  @@index([accountId])
+  @@index([key])
+  @@index([enabled])
+}
+
+model AccountSystemSetting {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  key String
+  value Json
+  description String?
+  locked Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, key])
+  @@index([accountId])
+  @@index([key])
+  @@index([locked])
+}
+
+// ======================================================
+// COMMUNICATION DELIVERY LOGS
+// ======================================================
+
+model NotificationDeliveryLog {
+  id String @id @default(uuid())
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  schoolId Int?
+  branchId Int?
+
+  channel String // in_app | sms | email | whatsapp | push
+  purpose String // announcement | message | fee_reminder | payroll | attendance | report | custom
+
+  recipientUserId String?
+  recipientType String?
+  recipientLocalId Int?
+  recipientName String?
+  recipientPhone String?
+  recipientEmail String?
+
+  subject String?
+  body    String?
+
+  status String @default("queued") // queued | sent | delivered | read | failed
+  provider String?
+  providerReference String?
+
+  sentAt DateTime?
+  deliveredAt DateTime?
+  readAt DateTime?
+  failedAt DateTime?
+  failedReason String?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([schoolId, branchId])
+  @@index([channel])
+  @@index([purpose])
+  @@index([recipientUserId])
+  @@index([recipientType, recipientLocalId])
+  @@index([status])
+  @@index([providerReference])
+  @@index([createdAt])
+}
