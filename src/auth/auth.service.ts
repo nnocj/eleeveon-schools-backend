@@ -22,7 +22,8 @@ export class AuthService {
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(
+      async (tx) => {
       const account = await tx.account.create({
         data: {
           name: dto.accountName.trim(),
@@ -76,7 +77,12 @@ export class AuthService {
 
       await this.seedDefaultPermissionRules(tx, account.id);
       return { account, user };
-    });
+    },
+    {
+      timeout: 20000,
+      maxWait: 10000,
+    }
+  );
 
     return this.sessionForUser(result.user.id);
   }
