@@ -141,6 +141,30 @@ const BLOCKED_PUSH_TABLES = new Set([
   "mediaBlobs",
 ]);
 
+const MEDIA_ASSETS_TABLE = "mediaAssets";
+
+/**
+ * Safe media fields that SHOULD sync across devices.
+ *
+ * mediaBlobs remain browser-local, so another device can only display an
+ * updated image if mediaAssets carries one of:
+ * - previewDataUrl
+ * - thumbnailDataUrl
+ * - remoteUrl/publicUrl
+ */
+const SAFE_MEDIA_SYNC_FIELDS = new Set([
+  "previewDataUrl",
+  "thumbnailDataUrl",
+  "remoteUrl",
+  "publicUrl",
+  "remoteKey",
+  "remoteProvider",
+  "uploadStatus",
+  "uploadedAt",
+  "uploadError",
+  "lastUploadAttemptAt",
+]);
+
 @Injectable()
 export class SyncService {
   constructor(private readonly prisma: PrismaService) {}
@@ -159,6 +183,7 @@ export class SyncService {
   async push(dto: PushSyncDto) {
     const results: SyncResult[] = [];
     const accountId = this.cleanId(dto.accountId);
+
     if (!accountId) {
       return {
         ok: false,
@@ -174,7 +199,9 @@ export class SyncService {
     for (const record of dto.records || []) {
       try {
         const tableName = this.cleanTableName(record.tableName);
+
         if (!tableName) throw new BadRequestException("Missing table name.");
+
         if (BLOCKED_PUSH_TABLES.has(tableName) || !LOCAL_FIRST_TABLES.has(tableName)) {
           throw new ForbiddenException(`${tableName} is not allowed to be pushed from the browser.`);
         }
@@ -188,10 +215,11 @@ export class SyncService {
           version: Number(record.version || 1),
           updatedAt: Number(record.updatedAt || Date.now()),
           isDeleted: Boolean(record.isDeleted),
-          payload: this.sanitizePayload(record.payload || {}),
+          payload: this.sanitizePayload(record.payload || {}, tableName),
         };
 
         const saved = await this.upsertRecord(normalizedRecord);
+
         results.push({
           tableName,
           localId: normalizedRecord.localId,
@@ -218,8 +246,13 @@ export class SyncService {
 
   async pull(dto: PullSyncDto) {
     const accountId = this.cleanId(dto.accountId);
+
     if (!accountId) {
-      return { records: [], serverTime: Date.now(), error: "Account session is missing. Please log out and sign in again." };
+      return {
+        records: [],
+        serverTime: Date.now(),
+        error: "Account session is missing. Please log out and sign in again.",
+      };
     }
 
     await this.ensureAccount(accountId);
@@ -228,6 +261,7 @@ export class SyncService {
     const requestedTables = Array.isArray(dto.tableNames)
       ? dto.tableNames.map((t) => this.cleanTableName(t)).filter(Boolean)
       : [];
+
     const tableFilter = requestedTables.length ? { in: requestedTables as string[] } : undefined;
 
     const records = await this.prisma.syncRecord.findMany({
@@ -259,6 +293,7 @@ export class SyncService {
   async bootstrap(user: { id?: string; accountId?: string; email?: string; role?: string }, dto?: PlatformCacheDto) {
     const accountId = this.cleanId(dto?.accountId || user.accountId);
     if (!accountId) throw new BadRequestException("Account session is missing.");
+
     await this.ensureAccount(accountId);
     await this.touchDevice({ accountId, userId: user.id, deviceId: dto?.deviceId, lastSeenAt: new Date() });
 
@@ -279,6 +314,7 @@ export class SyncService {
   async platformCache(dto: PlatformCacheDto) {
     const accountId = this.cleanId(dto.accountId);
     if (!accountId) throw new BadRequestException("Account session is missing.");
+
     await this.ensureAccount(accountId);
     await this.touchDevice({ accountId, deviceId: dto.deviceId, lastSeenAt: new Date() });
 
@@ -331,11 +367,22 @@ export class SyncService {
     ]);
 
     const records: any[] = [];
+
     const add = (tableName: string, rowOrRows: any) => {
       const rows = Array.isArray(rowOrRows) ? rowOrRows : rowOrRows ? [rowOrRows] : [];
+
       for (const row of rows) {
         const payload = this.toPlain(row);
-        records.push({ tableName, id: payload.id || payload.accountId, cloudId: payload.id || payload.accountId, accountId, updatedAt: payload.updatedAt || payload.createdAt || Date.now(), isDeleted: false, payload });
+
+        records.push({
+          tableName,
+          id: payload.id || payload.accountId,
+          cloudId: payload.id || payload.accountId,
+          accountId,
+          updatedAt: payload.updatedAt || payload.createdAt || Date.now(),
+          isDeleted: false,
+          payload,
+        });
       }
     };
 
@@ -367,7 +414,11 @@ export class SyncService {
   async registerDevice(user: { id?: string; accountId?: string }, dto: RegisterSyncDeviceDto) {
     const accountId = this.cleanId(dto.accountId || user.accountId);
     const deviceId = this.cleanString(dto.deviceId);
-    if (!accountId || !deviceId) throw new BadRequestException("accountId and deviceId are required.");
+
+    if (!accountId || !deviceId) {
+      throw new BadRequestException("accountId and deviceId are required.");
+    }
+
     await this.ensureAccount(accountId);
 
     const device = await this.prisma.syncDevice.upsert({
@@ -396,17 +447,22 @@ export class SyncService {
   async listConflicts(accountId?: string, status = "open") {
     const cleanAccountId = this.cleanId(accountId);
     if (!cleanAccountId) throw new BadRequestException("accountId is required.");
+
     const conflicts = await this.prisma.syncConflict.findMany({
       where: { accountId: cleanAccountId, ...(status ? { status } : {}) },
       orderBy: { detectedAt: "desc" },
       take: 200,
     });
+
     return { conflicts: conflicts.map((c) => this.toPlain(c)), serverTime: Date.now() };
   }
 
   async resolveConflict(accountId: string, conflictId: string, userId: string | undefined, dto: ResolveSyncConflictDto) {
     const conflict = await this.prisma.syncConflict.findUnique({ where: { id: conflictId } });
-    if (!conflict || conflict.accountId !== accountId) throw new NotFoundException("Conflict not found.");
+
+    if (!conflict || conflict.accountId !== accountId) {
+      throw new NotFoundException("Conflict not found.");
+    }
 
     const updated = await this.prisma.syncConflict.update({
       where: { id: conflictId },
@@ -424,6 +480,7 @@ export class SyncService {
 
   async diagnostics(accountId?: string) {
     const where = accountId ? { accountId } : {};
+
     const [total, deleted, conflicts, devices, tables] = await Promise.all([
       this.prisma.syncRecord.count({ where }),
       this.prisma.syncRecord.count({ where: { ...where, isDeleted: true } }),
@@ -436,31 +493,45 @@ export class SyncService {
         orderBy: { _count: { tableName: "desc" } },
       }),
     ]);
+
     return { total, deleted, conflicts, devices, tables };
   }
 
   private async ensureAccount(accountId: string) {
     const existing = await this.prisma.account.findUnique({ where: { id: accountId } });
     if (existing) return existing;
-    return this.prisma.account.create({ data: { id: accountId, name: "Local Account", email: null, status: "active" } });
+
+    return this.prisma.account.create({
+      data: { id: accountId, name: "Local Account", email: null, status: "active" },
+    });
   }
 
   private async upsertRecord(record: SyncPushRecordDto) {
     const accountId = this.cleanId(record.accountId);
-    if (!accountId) throw new Error("Account session is missing. Please log out and sign in again.");
+
+    if (!accountId) {
+      throw new Error("Account session is missing. Please log out and sign in again.");
+    }
 
     const cloudId = this.cleanString(record.cloudId);
     const deviceId = this.cleanString(record.deviceId);
     const now = Date.now();
     const updatedAt = BigInt(Number(record.updatedAt || now));
-    const payload = { ...(record.payload || {}), accountId, cloudId: cloudId || record.payload?.cloudId };
 
-    const existing = cloudId
-      ? await this.prisma.syncRecord.findUnique({ where: { id: cloudId } })
-      : await this.prisma.syncRecord.findFirst({
-          where: { accountId, tableName: record.tableName, localId: record.localId, ...(deviceId ? { deviceId } : {}) },
-          orderBy: { createdAt: "desc" },
-        });
+    const payload = {
+      ...(record.payload || {}),
+      accountId,
+      cloudId: cloudId || record.payload?.cloudId,
+    };
+
+    const existing = await this.findExistingSyncRecord({
+      accountId,
+      tableName: record.tableName,
+      cloudId,
+      localId: record.localId,
+      deviceId,
+      payload,
+    });
 
     if (existing) {
       if (existing.accountId !== accountId) {
@@ -477,7 +548,7 @@ export class SyncService {
         return { ...existing, conflictId: conflict?.id } as any;
       }
 
-      return this.prisma.syncRecord.update({
+      const saved = await this.prisma.syncRecord.update({
         where: { id: existing.id },
         data: {
           tableName: record.tableName,
@@ -487,12 +558,19 @@ export class SyncService {
           version: incomingVersion,
           updatedAt,
           isDeleted: Boolean(record.isDeleted),
-          payload: { ...payload, cloudId: cloudId || existing.cloudId || existing.id },
+          payload: {
+            ...payload,
+            cloudId: cloudId || existing.cloudId || existing.id,
+          },
         },
       });
+
+      await this.afterUpsertRecord(saved, record);
+
+      return saved;
     }
 
-    return this.prisma.syncRecord.create({
+    const saved = await this.prisma.syncRecord.create({
       data: {
         accountId,
         tableName: record.tableName,
@@ -505,6 +583,200 @@ export class SyncService {
         payload,
       },
     });
+
+    await this.afterUpsertRecord(saved, record);
+
+    return saved;
+  }
+
+  private async findExistingSyncRecord(args: {
+    accountId: string;
+    tableName: string;
+    cloudId?: string;
+    localId?: number;
+    deviceId?: string;
+    payload: Record<string, any>;
+  }) {
+    if (args.cloudId) {
+      const byCloudId = await this.prisma.syncRecord.findUnique({ where: { id: args.cloudId } });
+      if (byCloudId) return byCloudId;
+    }
+
+    if (args.tableName === MEDIA_ASSETS_TABLE) {
+      const mediaExisting = await this.findExistingMediaSyncRecord(args);
+      if (mediaExisting) return mediaExisting;
+    }
+
+    return this.prisma.syncRecord.findFirst({
+      where: {
+        accountId: args.accountId,
+        tableName: args.tableName,
+        localId: args.localId,
+        ...(args.deviceId ? { deviceId: args.deviceId } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  private async findExistingMediaSyncRecord(args: {
+    accountId: string;
+    tableName: string;
+    cloudId?: string;
+    localId?: number;
+    deviceId?: string;
+    payload: Record<string, any>;
+  }) {
+    const payload = args.payload || {};
+    const ownerTable = this.cleanString(payload.ownerTable);
+    const fieldKey = this.cleanString(payload.fieldKey);
+    const ownerCloudId = this.cleanString(payload.ownerCloudId);
+    const ownerTempKey = this.cleanString(payload.ownerTempKey);
+    const ownerLocalId = this.cleanNumber(payload.ownerLocalId);
+
+    if (ownerTempKey && ownerTable && fieldKey) {
+      const byTempKey = await this.prisma.syncRecord.findFirst({
+        where: {
+          accountId: args.accountId,
+          tableName: MEDIA_ASSETS_TABLE,
+          payload: {
+            path: ["ownerTempKey"],
+            equals: ownerTempKey,
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (byTempKey) return byTempKey;
+    }
+
+    if (ownerCloudId && ownerTable && fieldKey) {
+      const byOwnerCloudId = await this.prisma.syncRecord.findFirst({
+        where: {
+          accountId: args.accountId,
+          tableName: MEDIA_ASSETS_TABLE,
+          payload: {
+            path: ["ownerCloudId"],
+            equals: ownerCloudId,
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (byOwnerCloudId) return byOwnerCloudId;
+    }
+
+    // Do not match mediaAssets by localId alone unless we also have strict owner identity.
+    // Numeric local ids are different on each browser/device.
+    if (ownerLocalId && ownerTable && fieldKey) {
+      const candidates = await this.prisma.syncRecord.findMany({
+        where: {
+          accountId: args.accountId,
+          tableName: MEDIA_ASSETS_TABLE,
+          payload: {
+            path: ["ownerLocalId"],
+            equals: ownerLocalId,
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      });
+
+      const match = candidates.find((row: any) => {
+        const p = row.payload || {};
+        return p.ownerTable === ownerTable && p.fieldKey === fieldKey;
+      });
+
+      if (match) return match;
+    }
+
+    return null;
+  }
+
+  private async afterUpsertRecord(saved: any, incoming: SyncPushRecordDto) {
+    if (incoming.tableName !== MEDIA_ASSETS_TABLE) return;
+
+    const payload = (saved.payload || {}) as Record<string, any>;
+
+    // Ensure the saved payload contains the final cloud id so other devices can
+    // resolve a stable global identity after pull.
+    if (payload.cloudId !== saved.id) {
+      await this.prisma.syncRecord.update({
+        where: { id: saved.id },
+        data: {
+          cloudId: saved.cloudId || saved.id,
+          payload: { ...payload, cloudId: saved.id },
+        },
+      });
+    }
+
+    await this.deactivateReplacedMediaAssets(saved);
+  }
+
+  private async deactivateReplacedMediaAssets(activeRecord: any) {
+    const activePayload = (activeRecord.payload || {}) as Record<string, any>;
+    const accountId = activeRecord.accountId;
+
+    if (activeRecord.tableName !== MEDIA_ASSETS_TABLE) return;
+    if (activeRecord.isDeleted || activePayload.active === false || activePayload.isDeleted) return;
+
+    const ownerTable = this.cleanString(activePayload.ownerTable);
+    const fieldKey = this.cleanString(activePayload.fieldKey);
+    const ownerCloudId = this.cleanString(activePayload.ownerCloudId);
+    const ownerLocalId = this.cleanNumber(activePayload.ownerLocalId);
+    const ownerTempKey = this.cleanString(activePayload.ownerTempKey);
+
+    if (!ownerTable || !fieldKey) return;
+    if (!ownerCloudId && !ownerLocalId && !ownerTempKey) return;
+
+    const candidates = await this.prisma.syncRecord.findMany({
+      where: {
+        accountId,
+        tableName: MEDIA_ASSETS_TABLE,
+        NOT: { id: activeRecord.id },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 500,
+    });
+
+    const now = BigInt(Date.now());
+    const updates: Promise<any>[] = [];
+
+    for (const candidate of candidates) {
+      const payload = (candidate.payload || {}) as Record<string, any>;
+
+      if (payload.ownerTable !== ownerTable) continue;
+      if (payload.fieldKey !== fieldKey) continue;
+
+      const sameOwner =
+        (ownerCloudId && payload.ownerCloudId === ownerCloudId) ||
+        (ownerTempKey && payload.ownerTempKey === ownerTempKey) ||
+        (ownerLocalId && Number(payload.ownerLocalId || 0) === ownerLocalId);
+
+      if (!sameOwner) continue;
+      if (candidate.isDeleted || payload.isDeleted || payload.active === false) continue;
+
+      updates.push(
+        this.prisma.syncRecord.update({
+          where: { id: candidate.id },
+          data: {
+            isDeleted: true,
+            updatedAt: now,
+            version: Number(candidate.version || 1) + 1,
+            payload: {
+              ...payload,
+              active: false,
+              isDeleted: true,
+              replacedByCloudId: activeRecord.id,
+              replacedAt: Number(now),
+            },
+          },
+        })
+      );
+    }
+
+    if (updates.length) {
+      await Promise.all(updates);
+    }
   }
 
   private async recordConflict(args: { existing: any; incoming: SyncPushRecordDto; reason: string }) {
@@ -528,9 +800,17 @@ export class SyncService {
     }
   }
 
-  private async touchDevice(args: { accountId: string; userId?: string; deviceId?: string | null; lastSeenAt?: Date; lastPushAt?: Date; lastPullAt?: Date }) {
+  private async touchDevice(args: {
+    accountId: string;
+    userId?: string;
+    deviceId?: string | null;
+    lastSeenAt?: Date;
+    lastPushAt?: Date;
+    lastPullAt?: Date;
+  }) {
     const deviceId = this.cleanString(args.deviceId);
     if (!deviceId) return;
+
     try {
       await this.prisma.syncDevice.upsert({
         where: { accountId_deviceId: { accountId: args.accountId, deviceId } },
@@ -572,7 +852,13 @@ export class SyncService {
     return clean.replace(/[^a-zA-Z0-9_]/g, "");
   }
 
-  private sanitizePayload(payload: Record<string, any>) {
+  private cleanNumber(value?: number | string | null) {
+    if (value === undefined || value === null || value === "") return undefined;
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+
+  private sanitizePayload(payload: Record<string, any>, tableName?: string) {
     const copy = { ...(payload || {}) };
 
     // Security-sensitive fields must never leave the server/browser boundary.
@@ -584,23 +870,37 @@ export class SyncService {
     delete copy.secret;
     delete copy.secretHash;
 
-    // Media payload safety:
-    // mediaAssets may sync as metadata, but heavy file/blob/base64/object-url
-    // values must not be stored inside SyncRecord payloads. Actual binary upload
-    // should happen through a dedicated media upload endpoint/storage flow.
+    // Blob/file/browser-only data must never be stored inside SyncRecord payloads.
     delete copy.blob;
     delete copy.file;
     delete copy.fileBlob;
+    delete copy.originalFile;
+    delete copy.optimizedFile;
+    delete copy.localBlob;
+    delete copy.localBlobData;
     delete copy.data;
     delete copy.binary;
     delete copy.buffer;
     delete copy.arrayBuffer;
-    delete copy.base64;
-    delete copy.thumbnailBase64;
-    delete copy.previewUrl;
     delete copy.objectUrl;
     delete copy.localObjectUrl;
     delete copy.localPreviewUrl;
+    delete copy.previewUrl;
+
+    if (tableName === MEDIA_ASSETS_TABLE) {
+      // For mediaAssets, previewDataUrl and thumbnailDataUrl are intentionally
+      // preserved. They are the current cross-device image source until a
+      // dedicated remote media storage/upload endpoint is introduced.
+      for (const key of SAFE_MEDIA_SYNC_FIELDS) {
+        if (payload[key] !== undefined) copy[key] = payload[key];
+      }
+    } else {
+      // For ordinary school records, never allow accidental base64 media payloads.
+      delete copy.base64;
+      delete copy.thumbnailBase64;
+      delete copy.previewDataUrl;
+      delete copy.thumbnailDataUrl;
+    }
 
     return copy;
   }
@@ -610,6 +910,7 @@ export class SyncService {
     if (typeof value === "bigint") return Number(value);
     if (value instanceof Date) return value.toISOString();
     if (Array.isArray(value)) return value.map((v) => this.toPlain(v));
+
     if (typeof value === "object") {
       const out: any = {};
       for (const [key, val] of Object.entries(value)) {
@@ -617,6 +918,7 @@ export class SyncService {
       }
       return out;
     }
+
     return value;
   }
 
