@@ -1,12 +1,43 @@
+/**
+ * src/sync/dto/sync.dto.ts
+ * --------------------------------------------------------------------------
+ * Synchronization DTOs with Phase 21 priority workspace bootstrap.
+ */
+
+import { Type } from "class-transformer";
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsIn,
   IsInt,
   IsObject,
   IsOptional,
   IsString,
+  Max,
+  Min,
+  ValidateNested,
 } from "class-validator";
-import { Type } from "class-transformer";
+
+export const DEFAULT_SYNC_PULL_LIMIT = 500;
+export const MAX_SYNC_PULL_LIMIT = 2_000;
+
+export const WORKSPACE_BOOTSTRAP_ROLES = [
+  "developer",
+  "platform_team",
+  "super_admin",
+  "owner",
+  "admin",
+  "school_admin",
+  "branch_admin",
+  "teacher",
+  "student",
+  "parent",
+  "accountant",
+] as const;
+
+export type WorkspaceBootstrapRole =
+  (typeof WORKSPACE_BOOTSTRAP_ROLES)[number];
 
 export class SyncPushRecordDto {
   @IsString()
@@ -14,6 +45,7 @@ export class SyncPushRecordDto {
 
   @Type(() => Number)
   @IsInt()
+  @Min(1)
   localId!: number;
 
   @IsOptional()
@@ -30,10 +62,12 @@ export class SyncPushRecordDto {
 
   @Type(() => Number)
   @IsInt()
+  @Min(1)
   version!: number;
 
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   updatedAt!: number;
 
   @IsOptional()
@@ -54,8 +88,15 @@ export class PushSyncDto {
   deviceId?: string;
 
   @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SyncPushRecordDto)
   records!: SyncPushRecordDto[];
 }
+
+export type SyncPullCursor = {
+  updatedAt: number;
+  id: string;
+};
 
 export class PullSyncDto {
   @IsOptional()
@@ -69,10 +110,94 @@ export class PullSyncDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   since?: number;
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  cursorUpdatedAt?: number;
+
+  @IsOptional()
+  @IsString()
+  cursorId?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_SYNC_PULL_LIMIT)
+  limit?: number;
+
+  @IsOptional()
   @IsArray()
+  @ArrayMaxSize(250)
+  @IsString({ each: true })
+  tableNames?: string[];
+}
+
+/**
+ * A high-priority, role-scoped initial workspace request.
+ *
+ * accountId remains optional only for backward DTO compatibility. The
+ * controller always overwrites it with req.user.accountId.
+ */
+export class WorkspaceBootstrapDto {
+  @IsOptional()
+  @IsString()
+  accountId?: string;
+
+  @IsOptional()
+  @IsString()
+  deviceId?: string;
+
+  @IsOptional()
+  @IsString()
+  membershipId?: string;
+
+  @IsString()
+  @IsIn(WORKSPACE_BOOTSTRAP_ROLES)
+  role!: WorkspaceBootstrapRole;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  schoolId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  branchId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  teacherLocalId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  studentLocalId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  parentLocalId?: number;
+
+  /**
+   * Optional safe subset of the selected role's essential tables.
+   * The service never permits tables outside that role's bootstrap allow-list.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @IsString({ each: true })
   tableNames?: string[];
 }
 
@@ -117,6 +242,7 @@ export class PlatformCacheDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   since?: number;
 }
 

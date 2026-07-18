@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import * as bcrypt from "bcryptjs";
 import { PrismaService } from "../prisma/prisma.service";
+import { RealtimeEventsService } from "../realtime/realtime-events.service";
 import { AuthUser } from "../common/auth-user";
 import { assertSameAccountOrDeveloper } from "../common/scope";
 import { isDeveloper, normalizeRole } from "../common/roles";
@@ -11,7 +12,10 @@ const OWNER_ONLY_ROLES = new Set(["developer", "platform_team", "owner", "super_
 
 @Injectable()
 export class AccountsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly realtime: RealtimeEventsService,
+  ) {}
 
   private assertCanManageUsers(role: string) {
     if (!USER_MANAGEMENT_ROLES.has(role)) {
@@ -36,7 +40,7 @@ export class AccountsService {
 
   async createAccount(actor: AuthUser, dto: CreateAccountDto) {
     if (!isDeveloper(actor.role)) throw new ForbiddenException("Only developer can create platform accounts directly.");
-    return this.prisma.account.create({
+    const account = await this.prisma.account.create({
       data: {
         name: dto.name.trim(),
         email: dto.email?.toLowerCase().trim() || null,
@@ -45,6 +49,14 @@ export class AccountsService {
         currency: dto.currency || "GHS",
       },
     });
+
+    this.realtime.emitAccountDataChanged({
+      accountId: account.id,
+      changedTables: ["accounts"],
+      metadata: { action: "account-created" },
+    });
+
+    return account;
   }
 
   async getAccount(actor: AuthUser, accountId?: string) {
@@ -68,12 +80,24 @@ export class AccountsService {
     if (dto.status && !isDeveloper(actor.role)) {
       throw new ForbiddenException("Only developer can change account status.");
     }
-    return this.prisma.account.update({ where: { id: accountId }, data: dto });
+    const account = await this.prisma.account.update({ where: { id: accountId }, data: dto });
+    this.realtime.emitAccountDataChanged({
+      accountId,
+      changedTables: ["accounts"],
+      metadata: { action: "account-updated" },
+    });
+    return account;
   }
 
   async closeAccount(actor: AuthUser, accountId: string) {
     if (!isDeveloper(actor.role)) throw new ForbiddenException("Only developer can close platform accounts.");
-    return this.prisma.account.update({ where: { id: accountId }, data: { status: "closed" } });
+    const account = await this.prisma.account.update({ where: { id: accountId }, data: { status: "closed" } });
+    this.realtime.emitAccountDataChanged({
+      accountId,
+      changedTables: ["accounts"],
+      metadata: { action: "account-closed" },
+    });
+    return account;
   }
 
   async getUsers(actor: AuthUser, accountId?: string) {
@@ -107,7 +131,7 @@ export class AccountsService {
     if (existing) throw new BadRequestException("This email is already registered.");
     const passwordHash = await bcrypt.hash(dto.password, 12);
 
-    return this.prisma.$transaction(async (tx) => {
+    const created = await this.prisma.$transaction(async (tx) => {
       const user = await tx.appUser.create({
         data: { accountId: targetAccountId, fullName: dto.fullName.trim(), email, phone: dto.phone?.trim() || null, passwordHash, role, active: true },
       });
@@ -116,6 +140,20 @@ export class AccountsService {
       });
       return tx.appUser.findUnique({ where: { id: user.id }, select: { id: true, accountId: true, fullName: true, email: true, phone: true, role: true, active: true, createdAt: true, updatedAt: true, memberships: true } });
     });
+
+    if (created?.id) {
+      this.realtime.emitMembershipsChanged({
+        accountId: targetAccountId,
+        userId: created.id,
+        action: "created",
+        active: created.active !== false,
+        metadata: {
+          operation: "user-created",
+        },
+      });
+    }
+
+    return created;
   }
 
   async updateUser(actor: AuthUser, userId: string, dto: UpdateAccountUserDto) {
@@ -125,11 +163,23 @@ export class AccountsService {
     assertSameAccountOrDeveloper(actor, existing.accountId);
     if ([dto.role, existing.role].includes("developer") || [dto.role, existing.role].includes("platform_team")) { if (!isDeveloper(actor.role)) throw new ForbiddenException("Only developer can manage platform users."); }
     if ([dto.role, existing.role].includes("super_admin") || [dto.role, existing.role].includes("owner")) this.assertCanManageOwnerOnly(actor.role);
-    return this.prisma.appUser.update({
+    const user = await this.prisma.appUser.update({
       where: { id: userId },
       data: { fullName: dto.fullName?.trim(), phone: dto.phone?.trim(), role: dto.role },
       select: { id: true, accountId: true, fullName: true, email: true, phone: true, role: true, active: true, lastLoginAt: true, createdAt: true, updatedAt: true, memberships: true },
     });
+
+    this.realtime.emitMembershipsChanged({
+      accountId: existing.accountId,
+      userId: user.id,
+      action: "updated",
+      active: user.active !== false,
+      metadata: {
+        operation: "user-updated",
+      },
+    });
+
+    return user;
   }
 
   async updateUserStatus(actor: AuthUser, userId: string, dto: UpdateAccountUserStatusDto) {
@@ -140,7 +190,19 @@ export class AccountsService {
     if ((existing.role === "developer" || existing.role === "platform_team") && !isDeveloper(actor.role)) throw new ForbiddenException("Only developer can manage platform users.");
     if (existing.role === "super_admin" || existing.role === "owner") this.assertCanManageOwnerOnly(actor.role);
     if (existing.id === actor.id && dto.active === false) throw new BadRequestException("You cannot deactivate your own login.");
-    return this.prisma.appUser.update({ where: { id: userId }, data: { active: dto.active }, select: { id: true, active: true, role: true, email: true } });
+    const user = await this.prisma.appUser.update({ where: { id: userId }, data: { active: dto.active }, select: { id: true, active: true, role: true, email: true } });
+    this.realtime.emitMembershipsChanged({
+      accountId: existing.accountId,
+      userId: user.id,
+      action: dto.active ? "activated" : "deactivated",
+      active: user.active !== false,
+      metadata: {
+        operation: dto.active
+          ? "user-activated"
+          : "user-deactivated",
+      },
+    });
+    return user;
   }
 
   async deleteUser(actor: AuthUser, userId: string) {
@@ -174,7 +236,7 @@ async createOwnerRecord(
 ) {
   const now = Date.now();
 
-  return this.prisma.syncRecord.create({
+  const record = await this.prisma.syncRecord.create({
     data: {
       accountId,
       tableName,
@@ -193,6 +255,15 @@ async createOwnerRecord(
       },
     },
   });
+
+  this.realtime.emitAccountDataChanged({
+    accountId,
+    changedTables: [tableName],
+    sourceDeviceId: body.deviceId || "owner-web",
+    metadata: { action: "owner-record-created", recordId: record.id },
+  });
+
+  return record;
 }
 
 async updateOwnerRecord(accountId: string, id: string, body: any) {
@@ -206,7 +277,7 @@ async updateOwnerRecord(accountId: string, id: string, body: any) {
 
   const now = Date.now();
 
-  return this.prisma.syncRecord.update({
+  const record = await this.prisma.syncRecord.update({
     where: { id },
     data: {
       version: existing.version + 1,
@@ -220,6 +291,15 @@ async updateOwnerRecord(accountId: string, id: string, body: any) {
       },
     },
   });
+
+  this.realtime.emitAccountDataChanged({
+    accountId,
+    changedTables: [existing.tableName],
+    sourceDeviceId: body.deviceId,
+    metadata: { action: "owner-record-updated", recordId: id },
+  });
+
+  return record;
 }
 
 async deleteOwnerRecord(accountId: string, id: string) {
@@ -231,7 +311,7 @@ async deleteOwnerRecord(accountId: string, id: string) {
     throw new NotFoundException("Record not found.");
   }
 
-  return this.prisma.syncRecord.update({
+  const record = await this.prisma.syncRecord.update({
     where: { id },
     data: {
       isDeleted: true,
@@ -239,5 +319,13 @@ async deleteOwnerRecord(accountId: string, id: string) {
       updatedAt: BigInt(Date.now()),
     },
   });
+
+  this.realtime.emitAccountDataChanged({
+    accountId,
+    changedTables: [existing.tableName],
+    metadata: { action: "owner-record-deleted", recordId: id },
+  });
+
+  return record;
 }
 }
