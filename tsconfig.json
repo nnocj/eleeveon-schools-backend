@@ -1,8 +1,7 @@
 {
   "compilerOptions": {
     "module": "nodenext",
-    "types": ["node", "express", "multer"],
-    "typeRoots": ["./node_modules/@types", "./types"],
+    "types": ["node"],
     "moduleResolution": "nodenext",
     "resolvePackageJsonExports": true,
     "esModuleInterop": true,
