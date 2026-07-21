@@ -1,4 +1,3 @@
-
 /**
  * src/media/media.controller.ts
  * --------------------------------------------------------------------------
@@ -10,7 +9,9 @@
  * - req.user.accountId remains authoritative;
  * - uploaded files are held in memory before MediaStorageService persists them;
  * - generated media filenames are immutable and browser-cacheable;
- * - the configured upload limit is shared with MEDIA_MAX_FILE_SIZE_BYTES.
+ * - the configured upload limit is shared with MEDIA_MAX_FILE_SIZE_BYTES;
+ * - the uploaded-file type is derived from MediaService.upload(), avoiding
+ *   reliance on the global Express.Multer namespace during production builds.
  */
 
 import {
@@ -26,58 +27,43 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 
-import {
-  FileInterceptor,
-} from "@nestjs/platform-express";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { memoryStorage } from "multer";
 
-import {
-  memoryStorage,
-} from "multer";
+import type { Request, Response } from "express";
 
-import type {
-  Request,
-  Response,
-} from "express";
+import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 
-import {
-  JwtAuthGuard,
-} from "../auth/jwt-auth.guard";
+import type { AuthUser } from "../common/auth-user";
 
-import type {
-  AuthUser,
-} from "../common/auth-user";
+import { MediaUploadDto } from "./dto/media-upload.dto";
+import { MediaService } from "./media.service";
+import { MediaStorageService } from "./media-storage.service";
 
-import {
-  MediaUploadDto,
-} from "./dto/media-upload.dto";
+type AuthenticatedRequest = Request & {
+  user: AuthUser;
+};
 
-import {
-  MediaService,
-} from "./media.service";
+/**
+ * Keep the controller aligned with MediaService without importing or relying
+ * on the global Express.Multer namespace.
+ *
+ * MediaService.upload arguments:
+ * 0 → authenticated user
+ * 1 → upload DTO
+ * 2 → uploaded file
+ * 3 → request base URL
+ */
+type UploadedMediaFile = Parameters<MediaService["upload"]>[2];
 
-import {
-  MediaStorageService,
-} from "./media-storage.service";
+const DEFAULT_MEDIA_MAX_FILE_SIZE_BYTES = 8 * 1024 * 1024;
 
-type AuthenticatedRequest =
-  Request & {
-    user: AuthUser;
-  };
+function configuredUploadLimit(): number {
+  const configured = Number(
+    process.env.MEDIA_MAX_FILE_SIZE_BYTES,
+  );
 
-const DEFAULT_MEDIA_MAX_FILE_SIZE_BYTES =
-  8 * 1024 * 1024;
-
-function configuredUploadLimit() {
-  const configured =
-    Number(
-      process.env
-        .MEDIA_MAX_FILE_SIZE_BYTES,
-    );
-
-  return Number.isFinite(
-    configured,
-  ) &&
-    configured > 0
+  return Number.isFinite(configured) && configured > 0
     ? configured
     : DEFAULT_MEDIA_MAX_FILE_SIZE_BYTES;
 }
@@ -85,36 +71,27 @@ function configuredUploadLimit() {
 @Controller("media")
 export class MediaController {
   constructor(
-    private readonly mediaService:
-      MediaService,
-    private readonly storage:
-      MediaStorageService,
+    private readonly mediaService: MediaService,
+    private readonly storage: MediaStorageService,
   ) {}
 
-  @UseGuards(
-    JwtAuthGuard,
-  )
+  @UseGuards(JwtAuthGuard)
   @Post("upload")
   @UseInterceptors(
-    FileInterceptor(
-      "file",
-      {
-        storage:
-          memoryStorage(),
-        limits: {
-          fileSize:
-            configuredUploadLimit(),
-          files: 1,
-        },
+    FileInterceptor("file", {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: configuredUploadLimit(),
+        files: 1,
       },
-    ),
+    }),
   )
   async upload(
     @Req()
     req: AuthenticatedRequest,
 
     @UploadedFile()
-    file: Express.Multer.File,
+    file: UploadedMediaFile,
 
     @Body()
     dto: MediaUploadDto,
@@ -123,9 +100,7 @@ export class MediaController {
       req.user,
       dto,
       file,
-      this.requestBaseUrl(
-        req,
-      ),
+      this.requestBaseUrl(req),
     );
   }
 
@@ -142,9 +117,7 @@ export class MediaController {
    * Private files should later be moved behind authenticated access or signed
    * object-storage URLs.
    */
-  @Get(
-    "files/:accountId/:filename",
-  )
+  @Get("files/:accountId/:filename")
   async file(
     @Param("accountId")
     accountId: string,
@@ -154,18 +127,16 @@ export class MediaController {
 
     @Res()
     response: Response,
-  ) {
-    const opened =
-      await this.storage.open(
-        accountId,
-        filename,
-      );
+  ): Promise<void> {
+    const opened = await this.storage.open(
+      accountId,
+      filename,
+    );
 
-    const safeDownloadName =
-      filename.replace(
-        /["\\\r\n]/g,
-        "_",
-      );
+    const safeDownloadName = filename.replace(
+      /["\\\r\n]/g,
+      "_",
+    );
 
     response.setHeader(
       "Content-Type",
@@ -174,9 +145,7 @@ export class MediaController {
 
     response.setHeader(
       "Content-Length",
-      String(
-        opened.sizeBytes,
-      ),
+      String(opened.sizeBytes),
     );
 
     response.setHeader(
@@ -194,43 +163,28 @@ export class MediaController {
       "public, max-age=31536000, immutable",
     );
 
-    opened.stream.once(
-      "error",
-      () => {
-        if (
-          !response.headersSent
-        ) {
-          response
-            .status(500)
-            .end();
-          return;
-        }
+    opened.stream.once("error", () => {
+      if (!response.headersSent) {
+        response.status(500).end();
+        return;
+      }
 
-        response.destroy();
-      },
-    );
+      response.destroy();
+    });
 
-    opened.stream.pipe(
-      response,
-    );
+    opened.stream.pipe(response);
   }
 
   private requestBaseUrl(
     req: AuthenticatedRequest,
-  ) {
-    const forwardedProtocol =
-      this.firstForwardedValue(
-        req.headers[
-          "x-forwarded-proto"
-        ],
-      );
+  ): string {
+    const forwardedProtocol = this.firstForwardedValue(
+      req.headers["x-forwarded-proto"],
+    );
 
-    const forwardedHost =
-      this.firstForwardedValue(
-        req.headers[
-          "x-forwarded-host"
-        ],
-      );
+    const forwardedHost = this.firstForwardedValue(
+      req.headers["x-forwarded-host"],
+    );
 
     const protocol =
       forwardedProtocol ||
@@ -247,19 +201,13 @@ export class MediaController {
   }
 
   private firstForwardedValue(
-    value:
-      | string
-      | string[]
-      | undefined,
-  ) {
-    const normalized =
-      Array.isArray(value)
-        ? value[0]
-        : value;
+    value: string | string[] | undefined,
+  ): string {
+    const normalized = Array.isArray(value)
+      ? value[0]
+      : value;
 
-    return String(
-      normalized || "",
-    )
+    return String(normalized || "")
       .split(",")[0]
       .trim();
   }
