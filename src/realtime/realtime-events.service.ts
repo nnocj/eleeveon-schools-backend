@@ -1,7 +1,4 @@
-import {
-  Injectable,
-  Logger,
-} from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 
 export type RealtimeEventType =
   | "ACCOUNT_DATA_CHANGED"
@@ -27,8 +24,13 @@ export type RealtimeInvalidationEvent = {
   sourceDeviceId?: string;
   revision: number;
   at: number;
-  schoolId?: number | null;
-  branchId?: number | null;
+
+  /**
+   * School and branch identifiers use the same string-based identity model
+   * as the frontend Dexie database and backend UUID/string records.
+   */
+  schoolId?: string;
+  branchId?: string;
 
   /**
    * First-class identity fields allow the frontend to decide whether a
@@ -42,45 +44,55 @@ export type RealtimeInvalidationEvent = {
   metadata?: Record<string, unknown>;
 };
 
-type RealtimeEmitter = (
-  event: RealtimeInvalidationEvent,
-) => void;
+type RealtimeEmitter = (event: RealtimeInvalidationEvent) => void;
+
+type RealtimeEventInput = {
+  type: RealtimeEventType;
+  accountId: string;
+  changedTables: readonly string[];
+  sourceDeviceId?: string | null;
+  schoolId?: string | null;
+  branchId?: string | null;
+  userId?: string | null;
+  membershipId?: string | null;
+  action?: MembershipChangeAction;
+  active?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+function normalizeOptionalId(value: string | null | undefined): string | undefined {
+  if (value == null) return undefined;
+
+  const normalized = String(value).trim();
+  return normalized || undefined;
+}
 
 @Injectable()
 export class RealtimeEventsService {
-  private readonly logger =
-    new Logger(
-      RealtimeEventsService.name,
-    );
+  private readonly logger = new Logger(RealtimeEventsService.name);
 
-  private emitter:
-    | RealtimeEmitter
-    | null = null;
+  private emitter: RealtimeEmitter | null = null;
 
   private lastRevision = 0;
 
-  bindEmitter(
-    emitter: RealtimeEmitter,
-  ) {
+  bindEmitter(emitter: RealtimeEmitter): void {
     this.emitter = emitter;
   }
 
-  unbindEmitter() {
+  unbindEmitter(): void {
     this.emitter = null;
   }
 
   emitAccountDataChanged(input: {
     accountId: string;
-    changedTables:
-      readonly string[];
+    changedTables: readonly string[];
     sourceDeviceId?: string | null;
-    schoolId?: number | null;
-    branchId?: number | null;
+    schoolId?: string | null;
+    branchId?: string | null;
     metadata?: Record<string, unknown>;
-  }) {
+  }): RealtimeInvalidationEvent | null {
     return this.emit({
-      type:
-        "ACCOUNT_DATA_CHANGED",
+      type: "ACCOUNT_DATA_CHANGED",
       ...input,
     });
   }
@@ -92,45 +104,29 @@ export class RealtimeEventsService {
     action: MembershipChangeAction;
     active?: boolean;
     sourceDeviceId?: string | null;
-    schoolId?: number | null;
-    branchId?: number | null;
+    schoolId?: string | null;
+    branchId?: string | null;
     metadata?: Record<string, unknown>;
-  }) {
+  }): RealtimeInvalidationEvent | null {
+    const membershipId = normalizeOptionalId(input.membershipId);
+
     return this.emit({
-      type:
-        "MEMBERSHIPS_CHANGED",
-      accountId:
-        input.accountId,
-      changedTables: [
-        "userMemberships",
-        "appUsers",
-      ],
-      sourceDeviceId:
-        input.sourceDeviceId,
-      schoolId:
-        input.schoolId,
-      branchId:
-        input.branchId,
-      userId:
-        input.userId,
-      membershipId:
-        input.membershipId ||
-        undefined,
-      action:
-        input.action,
-      active:
-        input.active,
+      type: "MEMBERSHIPS_CHANGED",
+      accountId: input.accountId,
+      changedTables: ["userMemberships", "appUsers"],
+      sourceDeviceId: input.sourceDeviceId,
+      schoolId: input.schoolId,
+      branchId: input.branchId,
+      userId: input.userId,
+      membershipId,
+      action: input.action,
+      active: input.active,
       metadata: {
         ...input.metadata,
-        userId:
-          input.userId,
-        membershipId:
-          input.membershipId ||
-          undefined,
-        action:
-          input.action,
-        active:
-          input.active,
+        userId: input.userId,
+        membershipId,
+        action: input.action,
+        active: input.active,
       },
     });
   }
@@ -139,19 +135,13 @@ export class RealtimeEventsService {
     accountId: string;
     sourceDeviceId?: string | null;
     metadata?: Record<string, unknown>;
-  }) {
+  }): RealtimeInvalidationEvent | null {
     return this.emit({
-      type:
-        "PERMISSIONS_CHANGED",
-      accountId:
-        input.accountId,
-      changedTables: [
-        "permissionRules",
-      ],
-      sourceDeviceId:
-        input.sourceDeviceId,
-      metadata:
-        input.metadata,
+      type: "PERMISSIONS_CHANGED",
+      accountId: input.accountId,
+      changedTables: ["permissionRules"],
+      sourceDeviceId: input.sourceDeviceId,
+      metadata: input.metadata,
     });
   }
 
@@ -160,110 +150,47 @@ export class RealtimeEventsService {
     tableName: string;
     sourceDeviceId?: string | null;
     metadata?: Record<string, unknown>;
-  }) {
+  }): RealtimeInvalidationEvent | null {
     return this.emit({
-      type:
-        "SYNC_CONFLICT_CREATED",
-      accountId:
-        input.accountId,
-      changedTables: [
-        "syncConflicts",
-        input.tableName,
-      ],
-      sourceDeviceId:
-        input.sourceDeviceId,
-      metadata:
-        input.metadata,
+      type: "SYNC_CONFLICT_CREATED",
+      accountId: input.accountId,
+      changedTables: ["syncConflicts", input.tableName],
+      sourceDeviceId: input.sourceDeviceId,
+      metadata: input.metadata,
     });
   }
 
-  emit(input: {
-    type: RealtimeEventType;
-    accountId: string;
-    changedTables:
-      readonly string[];
-    sourceDeviceId?: string | null;
-    schoolId?: number | null;
-    branchId?: number | null;
-    userId?: string | null;
-    membershipId?: string | null;
-    action?: MembershipChangeAction;
-    active?: boolean;
-    metadata?: Record<string, unknown>;
-  }): RealtimeInvalidationEvent | null {
-    const accountId =
-      String(
-        input.accountId || "",
-      ).trim();
+  emit(input: RealtimeEventInput): RealtimeInvalidationEvent | null {
+    const accountId = String(input.accountId || "").trim();
 
     const changedTables = [
       ...new Set(
-        (
-          input.changedTables ||
-          []
-        )
-          .map((table) =>
-            String(
-              table || "",
-            ).trim(),
-          )
+        (input.changedTables || [])
+          .map((table) => String(table || "").trim())
           .filter(Boolean),
       ),
     ].sort();
 
-    if (
-      !accountId ||
-      changedTables.length === 0
-    ) {
+    if (!accountId || changedTables.length === 0) {
       return null;
     }
 
-    this.lastRevision =
-      Math.max(
-        this.lastRevision + 1,
-        Date.now(),
-      );
+    this.lastRevision = Math.max(this.lastRevision + 1, Date.now());
 
-    const event:
-      RealtimeInvalidationEvent = {
-      type:
-        input.type,
+    const event: RealtimeInvalidationEvent = {
+      type: input.type,
       accountId,
       changedTables,
-      sourceDeviceId:
-        input.sourceDeviceId
-          ? String(
-              input.sourceDeviceId,
-            ).trim()
-          : undefined,
-      revision:
-        this.lastRevision,
-      at:
-        Date.now(),
-      schoolId:
-        input.schoolId ??
-        undefined,
-      branchId:
-        input.branchId ??
-        undefined,
-      userId:
-        input.userId
-          ? String(
-              input.userId,
-            ).trim()
-          : undefined,
-      membershipId:
-        input.membershipId
-          ? String(
-              input.membershipId,
-            ).trim()
-          : undefined,
-      action:
-        input.action,
-      active:
-        input.active,
-      metadata:
-        input.metadata,
+      sourceDeviceId: normalizeOptionalId(input.sourceDeviceId),
+      revision: this.lastRevision,
+      at: Date.now(),
+      schoolId: normalizeOptionalId(input.schoolId),
+      branchId: normalizeOptionalId(input.branchId),
+      userId: normalizeOptionalId(input.userId),
+      membershipId: normalizeOptionalId(input.membershipId),
+      action: input.action,
+      active: input.active,
+      metadata: input.metadata,
     };
 
     if (!this.emitter) {

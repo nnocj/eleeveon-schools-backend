@@ -4,8 +4,14 @@
  * Authenticated media upload orchestration.
  *
  * This service stores the binary and returns a remote URL. The frontend then
- * writes the URL into its local mediaAssets record and normal synchronization
- * propagates that metadata to other devices.
+ * writes that URL into its local mediaAssets record, and normal synchronization
+ * propagates the metadata to other devices.
+ *
+ * Final media identity model:
+ * - assetId is an optional string ID;
+ * - ownerId is the permanent string ID of the owner record;
+ * - ownerTempKey supports uploads created before an owner is finalized;
+ * - ownerCloudId and ownerLocalId are no longer supported.
  */
 
 import {
@@ -26,8 +32,15 @@ import {
   MediaStorageService,
 } from "./media-storage.service";
 
+type UploadedMediaFile = {
+  originalname?: string;
+  mimetype?: string;
+  size?: number;
+  buffer?: Buffer;
+};
+
 const ALLOWED_OWNER_TABLES =
-  new Set([
+  new Set<string>([
     "schools",
     "branches",
     "schoolBranchSettings",
@@ -46,7 +59,7 @@ const ALLOWED_OWNER_TABLES =
   ]);
 
 const ALLOWED_FIELD_KEYS =
-  new Set([
+  new Set<string>([
     "logo",
     "photo",
     "coverPhoto",
@@ -78,7 +91,7 @@ export class MediaService {
   async upload(
     actor: AuthUser,
     dto: MediaUploadDto,
-    file: any,
+    file: UploadedMediaFile,
     requestBaseUrl: string,
   ) {
     const accountId =
@@ -92,16 +105,24 @@ export class MediaService {
       );
     }
 
-    if (
-      dto.accountId &&
+    const suppliedAccountId =
       String(
-        dto.accountId,
-      ).trim() !== accountId
+        dto.accountId || "",
+      ).trim();
+
+    if (
+      suppliedAccountId &&
+      suppliedAccountId !== accountId
     ) {
       throw new ForbiddenException(
         "The media upload account does not match the authenticated account.",
       );
     }
+
+    const assetId =
+      this.optionalString(
+        dto.assetId,
+      );
 
     const ownerTable =
       String(
@@ -113,13 +134,40 @@ export class MediaService {
         dto.fieldKey || "",
       ).trim();
 
+    const ownerId =
+      this.optionalString(
+        dto.ownerId,
+      );
+
+    const ownerTempKey =
+      this.optionalString(
+        dto.ownerTempKey,
+      );
+
+    const deviceId =
+      this.optionalString(
+        dto.deviceId,
+      );
+
+    const schoolId =
+      this.optionalString(
+        dto.schoolId,
+      );
+
+    const branchId =
+      this.optionalString(
+        dto.branchId,
+      );
+
     if (
       !ALLOWED_OWNER_TABLES.has(
         ownerTable,
       )
     ) {
       throw new BadRequestException(
-        `Media uploads are not allowed for owner table ${ownerTable || "unknown"}.`,
+        `Media uploads are not allowed for owner table ${
+          ownerTable || "unknown"
+        }.`,
       );
     }
 
@@ -129,17 +177,18 @@ export class MediaService {
       )
     ) {
       throw new BadRequestException(
-        `Media uploads are not allowed for field ${fieldKey || "unknown"}.`,
+        `Media uploads are not allowed for field ${
+          fieldKey || "unknown"
+        }.`,
       );
     }
 
     if (
-      !dto.ownerCloudId &&
-      !dto.ownerLocalId &&
-      !dto.ownerTempKey
+      !ownerId &&
+      !ownerTempKey
     ) {
       throw new BadRequestException(
-        "A media owner identity is required.",
+        "A media owner identity is required. Provide ownerId or ownerTempKey.",
       );
     }
 
@@ -152,10 +201,18 @@ export class MediaService {
     const base =
       String(
         requestBaseUrl || "",
-      ).replace(
-        /\/+$/,
-        "",
+      )
+        .trim()
+        .replace(
+          /\/+$/,
+          "",
+        );
+
+    if (!base) {
+      throw new BadRequestException(
+        "The media request base URL is required.",
       );
+    }
 
     const encodedAccount =
       encodeURIComponent(
@@ -172,23 +229,29 @@ export class MediaService {
 
     return {
       ok: true,
+
       assetId:
-        dto.assetId,
+        assetId || null,
+
       accountId,
       ownerTable,
       fieldKey,
-      ownerCloudId:
-        dto.ownerCloudId ||
-        null,
-      ownerLocalId:
-        dto.ownerLocalId ||
-        null,
+
+      ownerId:
+        ownerId || null,
+
       ownerTempKey:
-        dto.ownerTempKey ||
-        null,
+        ownerTempKey || null,
+
       deviceId:
-        dto.deviceId ||
-        null,
+        deviceId || null,
+
+      schoolId:
+        schoolId || null,
+
+      branchId:
+        branchId || null,
+
       publicUrl,
       remoteUrl:
         publicUrl,
@@ -196,16 +259,35 @@ export class MediaService {
         publicUrl,
       downloadUrl:
         publicUrl,
+
       storageKey:
         stored.storageKey,
+
       filename:
         stored.filename,
+
       mimeType:
         stored.mimeType,
+
       sizeBytes:
         stored.sizeBytes,
+
       uploadedAt:
         Date.now(),
     };
+  }
+
+  private optionalString(
+    value:
+      | string
+      | null
+      | undefined,
+  ) {
+    const normalized =
+      String(
+        value || "",
+      ).trim();
+
+    return normalized || null;
   }
 }

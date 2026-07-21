@@ -1,7 +1,13 @@
+
 /**
  * src/sync/dto/sync.dto.ts
  * --------------------------------------------------------------------------
  * Synchronization DTOs with Phase 21 priority workspace bootstrap.
+ *
+ * Final ID alignment:
+ * - local-first records use string IDs across Dexie and Prisma;
+ * - workspace bootstrap uses teacherId, studentId and parentId;
+ * - the backend no longer uses teacherLocalId, studentLocalId or parentLocalId.
  */
 
 import { Type } from "class-transformer";
@@ -43,10 +49,11 @@ export class SyncPushRecordDto {
   @IsString()
   tableName!: string;
 
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  localId!: number;
+  /**
+   * Local-first records use string IDs throughout Dexie and Prisma.
+   */
+  @IsString()
+  localId!: string;
 
   @IsOptional()
   @IsString()
@@ -88,7 +95,9 @@ export class PushSyncDto {
   deviceId?: string;
 
   @IsArray()
-  @ValidateNested({ each: true })
+  @ValidateNested({
+    each: true,
+  })
   @Type(() => SyncPushRecordDto)
   records!: SyncPushRecordDto[];
 }
@@ -133,15 +142,18 @@ export class PullSyncDto {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(250)
-  @IsString({ each: true })
+  @IsString({
+    each: true,
+  })
   tableNames?: string[];
 }
 
 /**
  * A high-priority, role-scoped initial workspace request.
  *
- * accountId remains optional only for backward DTO compatibility. The
- * controller always overwrites it with req.user.accountId.
+ * accountId remains optional only for backward DTO compatibility.
+ * The controller and service must always use req.user.accountId as the
+ * authoritative account identity.
  */
 export class WorkspaceBootstrapDto {
   @IsOptional()
@@ -161,43 +173,37 @@ export class WorkspaceBootstrapDto {
   role!: WorkspaceBootstrapRole;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  schoolId?: number;
+  @IsString()
+  schoolId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  branchId?: number;
+  @IsString()
+  branchId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  teacherLocalId?: number;
+  @IsString()
+  teacherId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  studentLocalId?: number;
+  @IsString()
+  studentId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  parentLocalId?: number;
+  @IsString()
+  parentId?: string;
 
   /**
    * Optional safe subset of the selected role's essential tables.
-   * The service never permits tables outside that role's bootstrap allow-list.
+   *
+   * The service must never permit tables outside the selected role's
+   * workspace bootstrap allow-list.
    */
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(100)
-  @IsString({ each: true })
+  @IsString({
+    each: true,
+  })
   tableNames?: string[];
 }
 
@@ -217,6 +223,9 @@ export class RegisterSyncDeviceDto {
   @IsString()
   deviceName?: string;
 
+  /**
+   * Legacy device-name alias retained for compatible clients.
+   */
   @IsOptional()
   @IsString()
   name?: string;
@@ -258,3 +267,4 @@ export class ResolveSyncConflictDto {
   @IsString()
   note?: string;
 }
+

@@ -10,6 +10,36 @@ import { CreateAccountDto, CreateAccountUserDto, UpdateAccountDto, UpdateAccount
 const USER_MANAGEMENT_ROLES = new Set(["developer", "platform_team", "owner", "super_admin", "admin", "branch_admin"]);
 const OWNER_ONLY_ROLES = new Set(["developer", "platform_team", "owner", "super_admin"]);
 
+/**
+ * Produces a stable identity for a membership scope.
+ *
+ * The key includes the role and every applicable permanent backend ID so that:
+ * - account-wide roles remain unique per account;
+ * - school/branch roles remain unique per assigned scope;
+ * - teacher/student/parent profiles do not collide.
+ */
+function buildMembershipScopeKey(input: {
+  accountId: string;
+  role: string;
+  schoolId?: string | null;
+  branchId?: string | null;
+  teacherId?: string | null;
+  studentId?: string | null;
+  parentId?: string | null;
+}): string {
+  return [
+    input.role,
+    `account:${input.accountId}`,
+    input.schoolId ? `school:${input.schoolId}` : null,
+    input.branchId ? `branch:${input.branchId}` : null,
+    input.teacherId ? `teacher:${input.teacherId}` : null,
+    input.studentId ? `student:${input.studentId}` : null,
+    input.parentId ? `parent:${input.parentId}` : null,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join("|");
+}
+
 @Injectable()
 export class AccountsService {
   constructor(
@@ -136,7 +166,26 @@ export class AccountsService {
         data: { accountId: targetAccountId, fullName: dto.fullName.trim(), email, phone: dto.phone?.trim() || null, passwordHash, role, active: true },
       });
       await tx.userMembership.create({
-        data: { accountId: targetAccountId, userId: user.id, role, schoolId: dto.schoolId, branchId: dto.branchId, teacherLocalId: dto.teacherLocalId, studentLocalId: dto.studentLocalId, parentLocalId: dto.parentLocalId, active: true },
+        data: {
+          accountId: targetAccountId,
+          userId: user.id,
+          role,
+          schoolId: dto.schoolId ?? null,
+          branchId: dto.branchId ?? null,
+          teacherId: dto.teacherId ?? null,
+          studentId: dto.studentId ?? null,
+          parentId: dto.parentId ?? null,
+          scopeKey: buildMembershipScopeKey({
+            accountId: targetAccountId,
+            role,
+            schoolId: dto.schoolId,
+            branchId: dto.branchId,
+            teacherId: dto.teacherId,
+            studentId: dto.studentId,
+            parentId: dto.parentId,
+          }),
+          active: true,
+        },
       });
       return tx.appUser.findUnique({ where: { id: user.id }, select: { id: true, accountId: true, fullName: true, email: true, phone: true, role: true, active: true, createdAt: true, updatedAt: true, memberships: true } });
     });
@@ -240,7 +289,10 @@ async createOwnerRecord(
     data: {
       accountId,
       tableName,
-      localId: body.id ? Number(body.id) : undefined,
+      localId:
+        body.id !== undefined && body.id !== null
+          ? String(body.id)
+          : undefined,
       cloudId: body.cloudId,
       deviceId: body.deviceId || "owner-web",
       version: 1,

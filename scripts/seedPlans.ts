@@ -3,7 +3,7 @@
 // Run: npx tsx scripts/seedPlans.ts
 // ======================================================
 
-import "dotenv/config";
+/*import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 
@@ -159,3 +159,4 @@ seedPlans()
   .finally(async () => {
     await prismaSeed.$disconnect();
   });
+*/

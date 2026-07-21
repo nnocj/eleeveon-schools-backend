@@ -1,5 +1,11 @@
-import { IsBoolean, IsEmail, IsIn, IsInt, IsOptional, IsString, MinLength } from "class-validator";
-import { Type } from "class-transformer";
+import {
+  IsBoolean,
+  IsEmail,
+  IsIn,
+  IsOptional,
+  IsString,
+  MinLength,
+} from "class-validator";
 import { ALL_APP_ROLES } from "../../common/roles";
 
 export class CreateAccountDto {
@@ -70,29 +76,24 @@ export class CreateAccountUserDto {
   role!: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  schoolId?: number;
+  @IsString()
+  schoolId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  branchId?: number;
+  @IsString()
+  branchId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  teacherLocalId?: number;
+  @IsString()
+  teacherId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  studentLocalId?: number;
+  @IsString()
+  studentId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  parentLocalId?: number;
+  @IsString()
+  parentId?: string;
 }
 
 export class UpdateAccountUserDto {
@@ -107,6 +108,26 @@ export class UpdateAccountUserDto {
   @IsOptional()
   @IsIn(ALL_APP_ROLES)
   role?: string;
+
+  @IsOptional()
+  @IsString()
+  schoolId?: string;
+
+  @IsOptional()
+  @IsString()
+  branchId?: string;
+
+  @IsOptional()
+  @IsString()
+  teacherId?: string;
+
+  @IsOptional()
+  @IsString()
+  studentId?: string;
+
+  @IsOptional()
+  @IsString()
+  parentId?: string;
 }
 
 export class UpdateAccountUserStatusDto {

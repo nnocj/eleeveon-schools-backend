@@ -25,13 +25,22 @@ import {
 
 type SyncResult = {
   tableName: string;
-  localId: number;
+  localId: string;
   cloudId?: string;
   version: number;
   updatedAt: number;
   ok: boolean;
   error?: string;
   conflictId?: string;
+};
+
+/**
+ * localId is a permanent client-generated UUID string.
+ * It must remain unchanged through validation, persistence, conflict handling,
+ * pull responses, media ownership and result output.
+ */
+type NormalizedSyncPushRecord = Omit<SyncPushRecordDto, "localId"> & {
+  localId: string;
 };
 
 /**
@@ -246,8 +255,7 @@ const SAFE_MEDIA_ASSET_FIELDS = new Set([
   "branchId",
   "cloudId",
   "ownerTable",
-  "ownerLocalId",
-  "ownerCloudId",
+  "ownerId",
   "ownerTempKey",
   "fieldKey",
   "ownerIdentityKey",
@@ -418,10 +426,16 @@ export class SyncService {
           throw new ForbiddenException(`${tableName} is not allowed to be pushed from the browser.`);
         }
 
-        const normalizedRecord: SyncPushRecordDto = {
+        const localId = this.requireLocalId(
+          record.localId,
+          tableName,
+        );
+
+        const normalizedRecord: NormalizedSyncPushRecord = {
           ...record,
           tableName,
           accountId,
+          localId,
           cloudId: this.cleanString(record.cloudId),
           deviceId: this.cleanString(record.deviceId || dto.deviceId),
           version: Number(record.version || 1),
@@ -451,7 +465,7 @@ export class SyncService {
       } catch (error: any) {
         results.push({
           tableName: record.tableName,
-          localId: Number(record.localId || 0),
+          localId: this.cleanString(record.localId) || "",
           cloudId: this.cleanString(record.cloudId) || undefined,
           version: Number(record.version || 1),
           updatedAt: Number(record.updatedAt || Date.now()),
@@ -613,7 +627,10 @@ export class SyncService {
 
       const plainRecord = {
         tableName: record.tableName,
-        localId: record.localId,
+        localId: this.requireLocalId(
+          record.localId,
+          record.tableName,
+        ),
         cloudId: record.id,
         accountId: record.accountId,
         deviceId:
@@ -704,33 +721,33 @@ export class SyncService {
       );
 
     const schoolId =
-      this.cleanNumber(
+      this.cleanId(
         dto.schoolId ??
           membership.schoolId,
       );
 
     const branchId =
-      this.cleanNumber(
+      this.cleanId(
         dto.branchId ??
           membership.branchId,
       );
 
-    const teacherLocalId =
-      this.cleanNumber(
-        dto.teacherLocalId ??
-          membership.teacherLocalId,
+    const teacherId =
+      this.cleanId(
+        dto.teacherId ??
+          membership.teacherId,
       );
 
-    const studentLocalId =
-      this.cleanNumber(
-        dto.studentLocalId ??
-          membership.studentLocalId,
+    const studentId =
+      this.cleanId(
+        dto.studentId ??
+          membership.studentId,
       );
 
-    const parentLocalId =
-      this.cleanNumber(
-        dto.parentLocalId ??
-          membership.parentLocalId,
+    const parentId =
+      this.cleanId(
+        dto.parentId ??
+          membership.parentId,
       );
 
     await this.assertWorkspaceScope({
@@ -738,9 +755,9 @@ export class SyncService {
       role,
       schoolId,
       branchId,
-      teacherLocalId,
-      studentLocalId,
-      parentLocalId,
+      teacherId,
+      studentId,
+      parentId,
     });
 
     const tables =
@@ -774,9 +791,9 @@ export class SyncService {
           role,
           schoolId,
           branchId,
-          teacherLocalId,
-          studentLocalId,
-          parentLocalId,
+          teacherId,
+          studentId,
+          parentId,
         },
       );
 
@@ -824,9 +841,9 @@ export class SyncService {
           role,
           schoolId,
           branchId,
-          teacherLocalId,
-          studentLocalId,
-          parentLocalId,
+          teacherId,
+          studentId,
+          parentId,
         },
       );
 
@@ -857,9 +874,9 @@ export class SyncService {
       role,
       schoolId,
       branchId,
-      teacherLocalId,
-      studentLocalId,
-      parentLocalId,
+      teacherId,
+      studentId,
+      parentId,
       workspace,
 
       // Explicit fields for the first-entry appearance handoff. Keep workspace
@@ -1194,12 +1211,12 @@ export class SyncService {
           !membership.branchId,
       );
 
-    const schoolIds = new Set<number>();
-    const branchIds = new Set<number>();
+    const schoolIds = new Set<string>();
+    const branchIds = new Set<string>();
 
     for (const membership of memberships) {
-      const schoolId = this.cleanNumber(membership.schoolId);
-      const branchId = this.cleanNumber(membership.branchId);
+      const schoolId = this.cleanId(membership.schoolId);
+      const branchId = this.cleanId(membership.branchId);
       if (schoolId) schoolIds.add(schoolId);
       if (branchId) branchIds.add(branchId);
     }
@@ -1215,14 +1232,14 @@ export class SyncService {
   private tenantIdsForRecord(
     tableName: string,
     payload: Record<string, any>,
-    localId?: number,
+    localId?: string,
   ) {
-    const schoolId = this.cleanNumber(
+    const schoolId = this.cleanId(
       payload.schoolId ||
         (tableName === "schools" ? payload.id || localId : undefined),
     );
 
-    const branchId = this.cleanNumber(
+    const branchId = this.cleanId(
       payload.branchId ||
         (tableName === "branches" ? payload.id || localId : undefined),
     );
@@ -1234,7 +1251,7 @@ export class SyncService {
     actor: AuthUser,
     tableName: string,
     payload: Record<string, any>,
-    localId?: number,
+    localId?: string,
   ) {
     const scope = await this.actorTenantScope(actor);
 
@@ -1384,19 +1401,19 @@ export class SyncService {
     }
 
     const requestedSchoolId =
-      this.cleanNumber(
+      this.cleanId(
         dto.schoolId,
       );
 
     const requestedBranchId =
-      this.cleanNumber(
+      this.cleanId(
         dto.branchId,
       );
 
     if (
       membership.schoolId &&
       requestedSchoolId &&
-      Number(
+      this.cleanId(
         membership.schoolId,
       ) !== requestedSchoolId
     ) {
@@ -1408,7 +1425,7 @@ export class SyncService {
     if (
       membership.branchId &&
       requestedBranchId &&
-      Number(
+      this.cleanId(
         membership.branchId,
       ) !== requestedBranchId
     ) {
@@ -1445,11 +1462,11 @@ export class SyncService {
       actor: AuthUser;
       role:
         WorkspaceBootstrapRole;
-      schoolId?: number;
-      branchId?: number;
-      teacherLocalId?: number;
-      studentLocalId?: number;
-      parentLocalId?: number;
+      schoolId?: string;
+      branchId?: string;
+      teacherId?: string;
+      studentId?: string;
+      parentId?: string;
     },
   ) {
     const {
@@ -1457,9 +1474,9 @@ export class SyncService {
       role,
       schoolId,
       branchId,
-      teacherLocalId,
-      studentLocalId,
-      parentLocalId,
+      teacherId,
+      studentId,
+      parentId,
     } = input;
 
     if (
@@ -1491,28 +1508,28 @@ export class SyncService {
 
     if (
       role === "teacher" &&
-      !teacherLocalId
+      !teacherId
     ) {
       throw new BadRequestException(
-        "Teacher workspace bootstrap requires teacherLocalId.",
+        "Teacher workspace bootstrap requires teacherId.",
       );
     }
 
     if (
       role === "student" &&
-      !studentLocalId
+      !studentId
     ) {
       throw new BadRequestException(
-        "Student workspace bootstrap requires studentLocalId.",
+        "Student workspace bootstrap requires studentId.",
       );
     }
 
     if (
       role === "parent" &&
-      !parentLocalId
+      !parentId
     ) {
       throw new BadRequestException(
-        "Parent workspace bootstrap requires parentLocalId.",
+        "Parent workspace bootstrap requires parentId.",
       );
     }
 
@@ -1578,19 +1595,19 @@ export class SyncService {
     scope: {
       role:
         WorkspaceBootstrapRole;
-      schoolId?: number;
-      branchId?: number;
-      teacherLocalId?: number;
-      studentLocalId?: number;
-      parentLocalId?: number;
+      schoolId?: string;
+      branchId?: string;
+      teacherId?: string;
+      studentId?: string;
+      parentId?: string;
     },
   ) {
     const childStudentIds =
-      new Set<number>();
+      new Set<string>();
 
     if (
       scope.role === "parent" &&
-      scope.parentLocalId
+      scope.parentId
     ) {
       for (const record of records) {
         if (
@@ -1607,16 +1624,14 @@ export class SyncService {
           >;
 
         if (
-          this.cleanNumber(
-            payload.parentLocalId ||
-              payload.parentId,
+          this.cleanId(
+            payload.parentId,
           ) ===
-          scope.parentLocalId
+          scope.parentId
         ) {
           const studentId =
-            this.cleanNumber(
-              payload.studentLocalId ||
-                payload.studentId,
+            this.cleanId(
+              payload.studentId,
             );
 
           if (studentId) {
@@ -1637,16 +1652,16 @@ export class SyncService {
       ),
     );
 
-    const allowedOwnerIds = new Map<string, Set<number>>();
+    const allowedOwnerIds = new Map<string, Set<string>>();
 
     for (const record of tenantScopedRecords) {
-      const localId = this.cleanNumber(
+      const localId = this.cleanId(
         record.payload?.id || record.localId,
       );
 
       if (!localId) continue;
 
-      const ids = allowedOwnerIds.get(record.tableName) || new Set<number>();
+      const ids = allowedOwnerIds.get(record.tableName) || new Set<string>();
       ids.add(localId);
       allowedOwnerIds.set(record.tableName, ids);
     }
@@ -1668,8 +1683,8 @@ export class SyncService {
         }
 
         if (record.tableName === "mediaAssets") {
-          const mediaSchoolId = this.cleanNumber(payload.schoolId);
-          const mediaBranchId = this.cleanNumber(payload.branchId);
+          const mediaSchoolId = this.cleanId(payload.schoolId);
+          const mediaBranchId = this.cleanId(payload.branchId);
 
           if (scope.schoolId && mediaSchoolId && mediaSchoolId !== scope.schoolId) {
             return false;
@@ -1680,10 +1695,10 @@ export class SyncService {
           }
 
           const ownerTable = this.cleanString(payload.ownerTable);
-          const ownerLocalId = this.cleanNumber(payload.ownerLocalId);
+          const ownerId = this.cleanId(payload.ownerId);
 
-          if (ownerTable && ownerLocalId) {
-            return Boolean(allowedOwnerIds.get(ownerTable)?.has(ownerLocalId));
+          if (ownerTable && ownerId) {
+            return Boolean(allowedOwnerIds.get(ownerTable)?.has(ownerId));
           }
 
           return Boolean(
@@ -1705,22 +1720,22 @@ export class SyncService {
         if (
           scope.role ===
             "student" &&
-          scope.studentLocalId
+          scope.studentId
         ) {
           return this.recordMatchesStudentWorkspace(
             record,
-            scope.studentLocalId,
+            scope.studentId,
           );
         }
 
         if (
           scope.role ===
             "parent" &&
-          scope.parentLocalId
+          scope.parentId
         ) {
           return this.recordMatchesParentWorkspace(
             record,
-            scope.parentLocalId,
+            scope.parentId,
             childStudentIds,
           );
         }
@@ -1728,11 +1743,11 @@ export class SyncService {
         if (
           scope.role ===
             "teacher" &&
-          scope.teacherLocalId
+          scope.teacherId
         ) {
           return this.recordMatchesTeacherWorkspace(
             record,
-            scope.teacherLocalId,
+            scope.teacherId,
           );
         }
 
@@ -1743,8 +1758,8 @@ export class SyncService {
 
   private recordMatchesWorkspaceTenant(
     record: any,
-    schoolId?: number,
-    branchId?: number,
+    schoolId?: string,
+    branchId?: string,
   ) {
     const payload =
       (record.payload || {}) as Record<
@@ -1753,7 +1768,7 @@ export class SyncService {
       >;
 
     const recordSchoolId =
-      this.cleanNumber(
+      this.cleanId(
         payload.schoolId ||
           (
             record.tableName ===
@@ -1765,7 +1780,7 @@ export class SyncService {
       );
 
     const recordBranchId =
-      this.cleanNumber(
+      this.cleanId(
         payload.branchId ||
           (
             record.tableName ===
@@ -1821,7 +1836,7 @@ export class SyncService {
 
   private recordMatchesStudentWorkspace(
     record: any,
-    studentLocalId: number,
+    studentId: string,
   ) {
     const sharedTables =
       new Set([
@@ -1850,9 +1865,8 @@ export class SyncService {
       >;
 
     return (
-      this.cleanNumber(
-        payload.studentLocalId ||
-          payload.studentId ||
+      this.cleanId(
+        payload.studentId ||
           (
             record.tableName ===
             "students"
@@ -1860,15 +1874,15 @@ export class SyncService {
                 record.localId
               : undefined
           ),
-      ) === studentLocalId
+      ) === studentId
     );
   }
 
   private recordMatchesParentWorkspace(
     record: any,
-    parentLocalId: number,
+    parentId: string,
     childStudentIds:
-      Set<number>,
+      Set<string>,
   ) {
     const sharedTables =
       new Set([
@@ -1895,9 +1909,8 @@ export class SyncService {
       >;
 
     const recordParentId =
-      this.cleanNumber(
-        payload.parentLocalId ||
-          payload.parentId ||
+      this.cleanId(
+        payload.parentId ||
           (
             record.tableName ===
             "parents"
@@ -1909,15 +1922,14 @@ export class SyncService {
 
     if (
       recordParentId ===
-      parentLocalId
+      parentId
     ) {
       return true;
     }
 
     const studentId =
-      this.cleanNumber(
-        payload.studentLocalId ||
-          payload.studentId ||
+      this.cleanId(
+        payload.studentId ||
           (
             record.tableName ===
             "students"
@@ -1937,7 +1949,7 @@ export class SyncService {
 
   private recordMatchesTeacherWorkspace(
     record: any,
-    teacherLocalId: number,
+    teacherId: string,
   ) {
     const sharedTables =
       new Set([
@@ -1970,10 +1982,9 @@ export class SyncService {
       >;
 
     return (
-      this.cleanNumber(
-        payload.teacherLocalId ||
-          payload.teacherId,
-      ) === teacherLocalId
+      this.cleanId(
+        payload.teacherId,
+      ) === teacherId
     );
   }
 
@@ -1984,7 +1995,10 @@ export class SyncService {
       tableName:
         record.tableName,
       localId:
-        record.localId,
+        this.requireLocalId(
+          record.localId,
+          record.tableName,
+        ),
       cloudId:
         record.id,
       accountId:
@@ -2010,11 +2024,11 @@ export class SyncService {
     scope: {
       role:
         WorkspaceBootstrapRole;
-      schoolId?: number;
-      branchId?: number;
-      teacherLocalId?: number;
-      studentLocalId?: number;
-      parentLocalId?: number;
+      schoolId?: string;
+      branchId?: string;
+      teacherId?: string;
+      studentId?: string;
+      parentId?: string;
     },
   ) {
     const latest = (
@@ -2062,9 +2076,9 @@ export class SyncService {
             "schoolBranchSettings",
             (payload) =>
               (!scope.schoolId ||
-                this.cleanNumber(payload.schoolId) === scope.schoolId) &&
+                this.cleanId(payload.schoolId) === scope.schoolId) &&
               (!scope.branchId ||
-                this.cleanNumber(payload.branchId) === scope.branchId),
+                this.cleanId(payload.branchId) === scope.branchId),
           )
         : null;
 
@@ -2077,7 +2091,7 @@ export class SyncService {
           "schools",
           (payload, record) =>
             !scope.schoolId ||
-            this.cleanNumber(
+            this.cleanId(
               payload.id ||
                 record.localId,
             ) ===
@@ -2088,7 +2102,7 @@ export class SyncService {
           "branches",
           (payload, record) =>
             !scope.branchId ||
-            this.cleanNumber(
+            this.cleanId(
               payload.id ||
                 record.localId,
             ) ===
@@ -2232,8 +2246,8 @@ export class SyncService {
       membershipId: string;
       role:
         WorkspaceBootstrapRole;
-      schoolId?: number;
-      branchId?: number;
+      schoolId?: string;
+      branchId?: string;
       records: any[];
       platformRecords: any[];
     },
@@ -2307,13 +2321,21 @@ export class SyncService {
     });
   }
 
-  private async upsertRecord(record: SyncPushRecordDto) {
+  private async upsertRecord(record: NormalizedSyncPushRecord) {
     const accountId = this.cleanId(record.accountId);
 
     if (!accountId) {
       throw new Error("Account session is missing. Please log out and sign in again.");
     }
 
+    const localId = this.requireLocalId(
+      record.localId,
+      record.tableName,
+    );
+    const storedLocalId = this.localIdToStorageString(
+      localId,
+      record.tableName,
+    );
     const cloudId = this.cleanString(record.cloudId);
     const deviceId = this.cleanString(record.deviceId);
     const now = Date.now();
@@ -2339,7 +2361,7 @@ export class SyncService {
       accountId,
       tableName: record.tableName,
       cloudId,
-      localId: record.localId,
+      localId,
       deviceId,
       payload,
     });
@@ -2363,7 +2385,7 @@ export class SyncService {
         where: { id: existing.id },
         data: {
           tableName: record.tableName,
-          localId: record.localId,
+          localId: storedLocalId,
           cloudId: cloudId || existing.cloudId || existing.id,
           deviceId,
           version: incomingVersion,
@@ -2385,7 +2407,7 @@ export class SyncService {
       data: {
         accountId,
         tableName: record.tableName,
-        localId: record.localId,
+        localId: storedLocalId,
         cloudId: cloudId || undefined,
         deviceId,
         version: Number(record.version || 1),
@@ -2404,7 +2426,7 @@ export class SyncService {
     accountId: string;
     tableName: string;
     cloudId?: string;
-    localId?: number;
+    localId?: string;
     deviceId?: string;
     payload: Record<string, any>;
   }) {
@@ -2422,7 +2444,13 @@ export class SyncService {
       where: {
         accountId: args.accountId,
         tableName: args.tableName,
-        localId: args.localId,
+        localId:
+          args.localId === undefined
+            ? undefined
+            : this.localIdToStorageString(
+                args.localId,
+                args.tableName,
+              ),
         ...(args.deviceId ? { deviceId: args.deviceId } : {}),
       },
       orderBy: { createdAt: "desc" },
@@ -2433,243 +2461,95 @@ export class SyncService {
     accountId: string;
     tableName: string;
     cloudId?: string;
-    localId?: number;
+    localId?: string;
     deviceId?: string;
     payload: Record<string, any>;
   }) {
     const payload = args.payload || {};
 
-    const ownerTable =
-      this.cleanString(payload.ownerTable);
-
-    const fieldKey =
-      this.cleanString(payload.fieldKey);
-
-    const ownerCloudId =
-      this.cleanString(payload.ownerCloudId);
-
-    const ownerTempKey =
-      this.cleanString(payload.ownerTempKey);
-
-    const ownerLocalId =
-      this.cleanNumber(payload.ownerLocalId);
-
-    const deviceId =
-      this.cleanString(
-        payload.deviceId ||
-          args.deviceId,
-      );
+    const ownerTable = this.cleanString(payload.ownerTable);
+    const fieldKey = this.cleanString(payload.fieldKey);
+    const ownerId = this.cleanId(payload.ownerId);
+    const ownerTempKey = this.cleanString(payload.ownerTempKey);
 
     const ownerIdentityKey =
-      this.cleanString(
-        payload.ownerIdentityKey,
-      ) ||
+      this.cleanString(payload.ownerIdentityKey) ||
       this.buildMediaIdentityKey({
         accountId: args.accountId,
         ownerTable,
         fieldKey,
-        ownerCloudId,
+        ownerId,
         ownerTempKey,
-        ownerLocalId,
-        deviceId,
       });
 
-    /**
-     * Fast exact lookup for Phase 16 records.
-     *
-     * ownerIdentityKey already includes:
-     * accountId + ownerTable + fieldKey + strongest owner identity.
-     */
     if (ownerIdentityKey) {
-      const candidates =
-        await this.prisma.syncRecord.findMany({
-          where: {
-            accountId: args.accountId,
-            tableName: MEDIA_ASSETS_TABLE,
-            payload: {
-              path: ["ownerIdentityKey"],
-              equals: ownerIdentityKey,
-            },
+      const candidates = await this.prisma.syncRecord.findMany({
+        where: {
+          accountId: args.accountId,
+          tableName: MEDIA_ASSETS_TABLE,
+          payload: {
+            path: ["ownerIdentityKey"],
+            equals: ownerIdentityKey,
           },
-          orderBy: {
-            updatedAt: "desc",
-          },
-          take: 20,
-        });
-
-      const exact = candidates.find(
-        (row: any) => {
-          const candidatePayload =
-            (row.payload || {}) as Record<
-              string,
-              any
-            >;
-
-          return (
-            candidatePayload.ownerIdentityKey ===
-              ownerIdentityKey &&
-            candidatePayload.ownerTable ===
-              ownerTable &&
-            candidatePayload.fieldKey ===
-              fieldKey
-          );
         },
-      );
+        orderBy: { updatedAt: "desc" },
+        take: 20,
+      });
+
+      const exact = candidates.find((row: any) => {
+        const candidatePayload = (row.payload || {}) as Record<string, any>;
+        return (
+          this.cleanString(candidatePayload.ownerIdentityKey) === ownerIdentityKey &&
+          this.cleanString(candidatePayload.ownerTable) === ownerTable &&
+          this.cleanString(candidatePayload.fieldKey) === fieldKey
+        );
+      });
 
       if (exact) return exact;
     }
 
-    /**
-     * Legacy fallback priority:
-     * 1. ownerCloudId
-     * 2. ownerTempKey
-     * 3. ownerLocalId + deviceId
-     *
-     * fieldKey is always included, so logo/photo/signature/etc. never merge.
-     */
-    if (
-      ownerCloudId &&
-      ownerTable &&
-      fieldKey
-    ) {
-      const candidates =
-        await this.prisma.syncRecord.findMany({
-          where: {
-            accountId: args.accountId,
-            tableName: MEDIA_ASSETS_TABLE,
-            payload: {
-              path: ["ownerCloudId"],
-              equals: ownerCloudId,
-            },
-          },
-          orderBy: {
-            updatedAt: "desc",
-          },
-          take: 50,
-        });
-
-      const exact = candidates.find(
-        (row: any) => {
-          const candidatePayload =
-            (row.payload || {}) as Record<
-              string,
-              any
-            >;
-
-          return (
-            this.cleanString(
-              candidatePayload.ownerCloudId,
-            ) === ownerCloudId &&
-            this.cleanString(
-              candidatePayload.ownerTable,
-            ) === ownerTable &&
-            this.cleanString(
-              candidatePayload.fieldKey,
-            ) === fieldKey
-          );
+    if (ownerId && ownerTable && fieldKey) {
+      const candidates = await this.prisma.syncRecord.findMany({
+        where: {
+          accountId: args.accountId,
+          tableName: MEDIA_ASSETS_TABLE,
+          payload: { path: ["ownerId"], equals: ownerId },
         },
-      );
+        orderBy: { updatedAt: "desc" },
+        take: 50,
+      });
+
+      const exact = candidates.find((row: any) => {
+        const candidatePayload = (row.payload || {}) as Record<string, any>;
+        return (
+          this.cleanId(candidatePayload.ownerId) === ownerId &&
+          this.cleanString(candidatePayload.ownerTable) === ownerTable &&
+          this.cleanString(candidatePayload.fieldKey) === fieldKey
+        );
+      });
 
       if (exact) return exact;
     }
 
-    if (
-      ownerTempKey &&
-      ownerTable &&
-      fieldKey
-    ) {
-      const candidates =
-        await this.prisma.syncRecord.findMany({
-          where: {
-            accountId: args.accountId,
-            tableName: MEDIA_ASSETS_TABLE,
-            payload: {
-              path: ["ownerTempKey"],
-              equals: ownerTempKey,
-            },
-          },
-          orderBy: {
-            updatedAt: "desc",
-          },
-          take: 50,
-        });
-
-      const exact = candidates.find(
-        (row: any) => {
-          const candidatePayload =
-            (row.payload || {}) as Record<
-              string,
-              any
-            >;
-
-          return (
-            this.cleanString(
-              candidatePayload.ownerTempKey,
-            ) === ownerTempKey &&
-            this.cleanString(
-              candidatePayload.ownerTable,
-            ) === ownerTable &&
-            this.cleanString(
-              candidatePayload.fieldKey,
-            ) === fieldKey
-          );
+    if (ownerTempKey && ownerTable && fieldKey) {
+      const candidates = await this.prisma.syncRecord.findMany({
+        where: {
+          accountId: args.accountId,
+          tableName: MEDIA_ASSETS_TABLE,
+          payload: { path: ["ownerTempKey"], equals: ownerTempKey },
         },
-      );
+        orderBy: { updatedAt: "desc" },
+        take: 50,
+      });
 
-      if (exact) return exact;
-    }
-
-    if (
-      ownerLocalId &&
-      deviceId &&
-      ownerTable &&
-      fieldKey
-    ) {
-      const candidates =
-        await this.prisma.syncRecord.findMany({
-          where: {
-            accountId: args.accountId,
-            tableName: MEDIA_ASSETS_TABLE,
-            payload: {
-              path: ["ownerLocalId"],
-              equals: ownerLocalId,
-            },
-          },
-          orderBy: {
-            updatedAt: "desc",
-          },
-          take: 50,
-        });
-
-      const exact = candidates.find(
-        (row: any) => {
-          const candidatePayload =
-            (row.payload || {}) as Record<
-              string,
-              any
-            >;
-
-          const candidateDeviceId =
-            this.cleanString(
-              candidatePayload.deviceId ||
-                row.deviceId,
-            );
-
-          return (
-            Number(
-              candidatePayload.ownerLocalId ||
-                0,
-            ) === ownerLocalId &&
-            candidateDeviceId === deviceId &&
-            this.cleanString(
-              candidatePayload.ownerTable,
-            ) === ownerTable &&
-            this.cleanString(
-              candidatePayload.fieldKey,
-            ) === fieldKey
-          );
-        },
-      );
+      const exact = candidates.find((row: any) => {
+        const candidatePayload = (row.payload || {}) as Record<string, any>;
+        return (
+          this.cleanString(candidatePayload.ownerTempKey) === ownerTempKey &&
+          this.cleanString(candidatePayload.ownerTable) === ownerTable &&
+          this.cleanString(candidatePayload.fieldKey) === fieldKey
+        );
+      });
 
       if (exact) return exact;
     }
@@ -2679,7 +2559,7 @@ export class SyncService {
 
   private async afterUpsertRecord(
     saved: any,
-    incoming: SyncPushRecordDto,
+    incoming: NormalizedSyncPushRecord,
   ) {
     if (
       incoming.tableName !==
@@ -2783,19 +2663,14 @@ export class SyncService {
         activePayload.fieldKey,
       );
 
-    const ownerCloudId =
-      this.cleanString(
-        activePayload.ownerCloudId,
+    const ownerId =
+      this.cleanId(
+        activePayload.ownerId,
       );
 
     const ownerTempKey =
       this.cleanString(
         activePayload.ownerTempKey,
-      );
-
-    const ownerLocalId =
-      this.cleanNumber(
-        activePayload.ownerLocalId,
       );
 
     const deviceId =
@@ -2812,10 +2687,8 @@ export class SyncService {
         accountId,
         ownerTable,
         fieldKey,
-        ownerCloudId,
+        ownerId,
         ownerTempKey,
-        ownerLocalId,
-        deviceId,
       });
 
     if (
@@ -2891,22 +2764,13 @@ export class SyncService {
             this.cleanString(
               payload.fieldKey,
             ),
-          ownerCloudId:
-            this.cleanString(
-              payload.ownerCloudId,
+          ownerId:
+            this.cleanId(
+              payload.ownerId,
             ),
           ownerTempKey:
             this.cleanString(
               payload.ownerTempKey,
-            ),
-          ownerLocalId:
-            this.cleanNumber(
-              payload.ownerLocalId,
-            ),
-          deviceId:
-            this.cleanString(
-              payload.deviceId ||
-                candidate.deviceId,
             ),
         });
 
@@ -2954,13 +2818,16 @@ export class SyncService {
     }
   }
 
-  private async recordConflict(args: { existing: any; incoming: SyncPushRecordDto; reason: string }) {
+  private async recordConflict(args: { existing: any; incoming: NormalizedSyncPushRecord; reason: string }) {
     try {
       const conflict = await this.prisma.syncConflict.create({
         data: {
           accountId: args.existing.accountId,
           tableName: args.existing.tableName,
-          localId: args.incoming.localId,
+          localId: this.localIdToStorageString(
+            args.incoming.localId,
+            args.existing.tableName,
+          ),
           cloudId: args.existing.id,
           deviceId: args.incoming.deviceId,
           conflictType: args.reason,
@@ -3062,7 +2929,7 @@ export class SyncService {
 
   private async validateIncomingSyncRecord(
     actor: AuthUser,
-    record: SyncPushRecordDto,
+    record: NormalizedSyncPushRecord,
     activeAccountId: string,
   ) {
     const tableName =
@@ -3099,16 +2966,10 @@ export class SyncService {
       );
     }
 
-    if (
-      !Number.isFinite(
-        Number(record.localId),
-      ) ||
-      Number(record.localId) <= 0
-    ) {
-      throw new BadRequestException(
-        `${tableName} has no valid localId.`,
-      );
-    }
+    this.requireLocalId(
+      record.localId,
+      tableName,
+    );
 
     if (
       !Number.isFinite(
@@ -3164,7 +3025,10 @@ export class SyncService {
       actor,
       tableName,
       record.payload,
-      record.localId,
+      this.requireLocalId(
+        record.localId,
+        tableName,
+      ),
     );
   }
 
@@ -3204,12 +3068,7 @@ export class SyncService {
       );
     }
 
-    if (
-      !Number.isFinite(
-        Number(record?.localId),
-      ) ||
-      Number(record?.localId) <= 0
-    ) {
+    if (!this.isValidUuid(record?.localId)) {
       reasons.push(
         "INVALID_LOCAL_ID",
       );
@@ -3300,7 +3159,7 @@ export class SyncService {
 
     if (
       requiresSchool &&
-      !this.cleanNumber(
+      !this.cleanId(
         payload.schoolId,
       )
     ) {
@@ -3313,7 +3172,7 @@ export class SyncService {
       BRANCH_REQUIRED_TABLES.has(
         tableName,
       ) &&
-      !this.cleanNumber(
+      !this.cleanId(
         payload.branchId,
       )
     ) {
@@ -3369,60 +3228,31 @@ export class SyncService {
     recordDeviceId?: string,
     isDeleted = false,
   ) {
-    const ownerTable =
-      this.cleanString(payload.ownerTable);
+    const ownerTable = this.cleanString(payload.ownerTable);
+    const fieldKey = this.cleanString(payload.fieldKey);
+    const ownerId = this.cleanId(payload.ownerId);
+    const ownerTempKey = this.cleanString(payload.ownerTempKey);
+    const deviceId = this.cleanString(payload.deviceId || recordDeviceId);
 
-    const fieldKey =
-      this.cleanString(payload.fieldKey);
-
-    const ownerCloudId =
-      this.cleanString(payload.ownerCloudId);
-
-    const ownerTempKey =
-      this.cleanString(payload.ownerTempKey);
-
-    const ownerLocalId =
-      this.cleanNumber(payload.ownerLocalId);
-
-    const deviceId =
-      this.cleanString(
-        payload.deviceId ||
-          recordDeviceId,
-      );
-
-    const ownerIdentityKey =
-      this.buildMediaIdentityKey({
-        accountId,
-        ownerTable,
-        fieldKey,
-        ownerCloudId,
-        ownerTempKey,
-        ownerLocalId,
-        deviceId,
-      });
+    const ownerIdentityKey = this.buildMediaIdentityKey({
+      accountId,
+      ownerTable,
+      fieldKey,
+      ownerId,
+      ownerTempKey,
+    });
 
     const active =
       payload.active !== false &&
       payload.isDeleted !== true &&
       !isDeleted;
 
-    /**
-     * Active media without exact owner identity is unsafe because it could be
-     * attached to the wrong owner/field on another device.
-     *
-     * Deleted tombstones are allowed through so old records can still be
-     * deactivated remotely.
-     */
     if (
       active &&
-      (
-        !ownerTable ||
-        !fieldKey ||
-        !ownerIdentityKey
-      )
+      (!ownerTable || !fieldKey || !ownerIdentityKey)
     ) {
       throw new BadRequestException(
-        "Active mediaAssets require accountId, ownerTable, fieldKey, and ownerCloudId, ownerTempKey, or ownerLocalId with deviceId.",
+        "Active mediaAssets require accountId, ownerTable, fieldKey, and ownerId or ownerTempKey.",
       );
     }
 
@@ -3430,13 +3260,12 @@ export class SyncService {
       ...payload,
       accountId,
       ownerTable,
-      fieldKey,
-      ownerCloudId,
+      ownerId,
       ownerTempKey,
-      ownerLocalId,
+      fieldKey,
       deviceId,
       ownerIdentityKey,
-      identityVersion: 1,
+      identityVersion: 2,
     };
   }
 
@@ -3444,48 +3273,27 @@ export class SyncService {
     accountId?: string;
     ownerTable?: string;
     fieldKey?: string;
-    ownerCloudId?: string;
+    ownerId?: string;
     ownerTempKey?: string;
-    ownerLocalId?: number;
-    deviceId?: string;
   }) {
-    const accountId =
-      this.cleanString(
-        input.accountId,
-      );
+    const accountId = this.cleanString(input.accountId);
+    const ownerTable = this.cleanString(input.ownerTable);
+    const fieldKey = this.cleanString(input.fieldKey);
 
-    const ownerTable =
-      this.cleanString(
-        input.ownerTable,
-      );
-
-    const fieldKey =
-      this.cleanString(
-        input.fieldKey,
-      );
-
-    if (
-      !accountId ||
-      !ownerTable ||
-      !fieldKey
-    ) {
+    if (!accountId || !ownerTable || !fieldKey) {
       return undefined;
     }
 
-    const encode = (
-      value: string | number,
-    ) =>
-      encodeURIComponent(
-        String(value),
-      );
+    const encode = (value: string | number) =>
+      encodeURIComponent(String(value));
 
-    if (input.ownerCloudId) {
+    if (input.ownerId) {
       return [
         encode(accountId),
         encode(ownerTable),
         encode(fieldKey),
-        "cloud",
-        encode(input.ownerCloudId),
+        "owner",
+        encode(input.ownerId),
       ].join("|");
     }
 
@@ -3496,20 +3304,6 @@ export class SyncService {
         encode(fieldKey),
         "temp",
         encode(input.ownerTempKey),
-      ].join("|");
-    }
-
-    if (
-      input.ownerLocalId &&
-      input.deviceId
-    ) {
-      return [
-        encode(accountId),
-        encode(ownerTable),
-        encode(fieldKey),
-        "local",
-        encode(input.ownerLocalId),
-        encode(input.deviceId),
       ].join("|");
     }
 
@@ -3535,6 +3329,54 @@ export class SyncService {
     if (value === undefined || value === null || value === "") return undefined;
     const n = Number(value);
     return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+
+  private isValidUuid(value: unknown): value is string {
+    const clean = this.cleanString(
+      value === undefined || value === null
+        ? undefined
+        : String(value),
+    );
+
+    return Boolean(
+      clean &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          clean,
+        ),
+    );
+  }
+
+  private requireLocalId(
+    value: number | string | null | undefined,
+    tableName?: string,
+  ): string {
+    const localId = this.cleanString(
+      value === undefined || value === null
+        ? undefined
+        : String(value),
+    );
+
+    if (!localId || !this.isValidUuid(localId)) {
+      throw new BadRequestException(
+        `${tableName || "Sync record"} has no valid UUID localId.`,
+      );
+    }
+
+    return localId;
+  }
+
+  /**
+   * Prisma stores SyncRecord.localId and SyncConflict.localId as strings.
+   * UUID local IDs are persisted exactly as generated by the client.
+   */
+  private localIdToStorageString(
+    value: number | string | null | undefined,
+    tableName?: string,
+  ): string {
+    return this.requireLocalId(
+      value,
+      tableName,
+    );
   }
 
   private sanitizePayload(payload: Record<string, any>, tableName?: string) {

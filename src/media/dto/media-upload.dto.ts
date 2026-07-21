@@ -3,51 +3,78 @@
  * --------------------------------------------------------------------------
  * Multipart metadata sent together with a media file.
  *
+ * Final media identity model:
+ * - all record IDs are strings;
+ * - ownerId is the permanent owner record ID;
+ * - ownerTempKey supports media created before the owner record is finalized;
+ * - ownerLocalId and ownerCloudId are not part of the schema.
+ *
  * Security:
  * - accountId is accepted only for compatibility and is never authoritative;
- * - the controller/service always uses req.user.accountId;
+ * - the controller and service always use req.user.accountId;
  * - owner and field metadata are validated and normalized before storage.
  */
 
-import { Type } from "class-transformer";
 import {
-  IsInt,
   IsOptional,
   IsString,
-  Min,
 } from "class-validator";
 
 export class MediaUploadDto {
+  /**
+   * Compatibility-only account identifier.
+   *
+   * The authenticated JWT accountId must always override this value.
+   */
   @IsOptional()
   @IsString()
   accountId?: string;
 
   /**
-   * Local Dexie mediaAssets ID.
-   * Multipart form values arrive as strings, so class-transformer converts it.
+   * Permanent string ID of the local-first mediaAssets record.
    */
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  assetId?: number;
+  @IsString()
+  assetId?: string;
 
+  /**
+   * Dexie table that owns the media asset.
+   *
+   * Examples:
+   * - students
+   * - teachers
+   * - schools
+   * - branches
+   */
   @IsString()
   ownerTable!: string;
 
+  /**
+   * Field on the owner record represented by this asset.
+   *
+   * Examples:
+   * - photo
+   * - logo
+   * - signature
+   * - coverImage
+   */
   @IsString()
   fieldKey!: string;
 
+  /**
+   * Permanent string ID of the owner record.
+   *
+   * At least one of ownerId or ownerTempKey must be supplied. That
+   * cross-field rule should be enforced by the media service.
+   */
   @IsOptional()
   @IsString()
-  ownerCloudId?: string;
+  ownerId?: string;
 
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  ownerLocalId?: number;
-
+  /**
+   * Temporary identity used when media is created before the owner record has
+   * received or finalized its permanent ID.
+   */
   @IsOptional()
   @IsString()
   ownerTempKey?: string;
@@ -64,3 +91,4 @@ export class MediaUploadDto {
   @IsString()
   branchId?: string;
 }
+

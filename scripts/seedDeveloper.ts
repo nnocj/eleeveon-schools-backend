@@ -3,7 +3,7 @@
 // Run: DEVELOPER_EMAIL=you@email.com DEVELOPER_PASSWORD=yourpass npx tsx scripts/seedDeveloper.ts
 // ======================================================
 
-import "dotenv/config";
+/*import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import * as bcrypt from "bcryptjs";
@@ -72,3 +72,4 @@ seedDeveloper()
   .finally(async () => {
     await prismaSeed.$disconnect();
   });
+*/

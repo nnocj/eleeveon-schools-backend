@@ -7,8 +7,8 @@
 // - Adds backend-only platform infrastructure for audit logs, API clients,
 //   API keys, webhooks, integration mapping, storage usage, background jobs,
 //   notification delivery logs, and payment provider events.
-// - Designed to work with an offline-first Dexie app where most school records
-//   live inside SyncRecord payloads and are linked by local Dexie IDs.
+// - Designed to work with an offline-first Dexie app where synced school records
+//   use permanent string IDs inside SyncRecord payloads.
 // ======================================================
 
 generator client {
@@ -24,10 +24,10 @@ datasource db {
 // ======================================================
 
 model Account {
-  id        String   @id @default(uuid())
-  name      String
-  email     String?  @unique
-  phone     String?
+  id    String  @id @default(uuid())
+  name  String
+  email String? @unique
+  phone String?
 
   // Account-level organization profile and branding.
   // Media fields store references only; image/blob data stays in the app media system.
@@ -45,27 +45,28 @@ model Account {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users              AppUser[]
-  memberships        UserMembership[]
-  records            SyncRecord[]
-  subscription       AccountSubscription?
-  billingEvents      BillingEvent[]
-  invoices           Invoice[]
-  payments           AppPayment[]
-  permissionRules    PermissionRule[]
+  users           AppUser[]
+  memberships     UserMembership[]
+  sessions        UserSession[]
+  records         SyncRecord[]
+  subscription    AccountSubscription?
+  billingEvents   BillingEvent[]
+  invoices        Invoice[]
+  payments        AppPayment[]
+  permissionRules PermissionRule[]
 
-  apiClients         ApiClient[]
-  apiKeys            ApiKey[]
-  webhooks           Webhook[]
-  webhookLogs        WebhookLog[]
-  auditLogs          AuditLog[]
-  storageUsage       StorageUsage?
-  backgroundJobs     BackgroundJob[]
+  apiClients          ApiClient[]
+  apiKeys             ApiKey[]
+  webhooks            Webhook[]
+  webhookLogs         WebhookLog[]
+  auditLogs           AuditLog[]
+  storageUsage        StorageUsage?
+  backgroundJobs      BackgroundJob[]
   integrationMappings IntegrationMapping[]
-  notificationLogs   NotificationDeliveryLog[]
-  paymentEvents      PaymentProviderEvent[]
-  featureFlags       AccountFeatureFlag[]
-  systemSettings     AccountSystemSetting[]
+  notificationLogs    NotificationDeliveryLog[]
+  paymentEvents       PaymentProviderEvent[]
+  featureFlags        AccountFeatureFlag[]
+  systemSettings      AccountSystemSetting[]
 
   @@index([email])
   @@index([status])
@@ -82,21 +83,21 @@ model AppUser {
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   fullName     String
-  email        String @unique
+  email        String  @unique
   phone        String?
   passwordHash String
 
   // Fallback/default role. Keep this so your current app does not break.
-  role         String @default("super_admin") // developer | platform_team | super_admin | admin | branch_admin | accountant | teacher | student | parent
-  active       Boolean @default(true)
-  lastLoginAt  DateTime?
+  role        String    @default("super_admin") // developer | platform_team | super_admin | school_admin | branch_admin | accountant | teacher | student | parent
+  active      Boolean   @default(true)
+  lastLoginAt DateTime?
 
   // Optional security/account recovery fields.
-  emailVerifiedAt DateTime?
-  phoneVerifiedAt DateTime?
+  emailVerifiedAt   DateTime?
+  phoneVerifiedAt   DateTime?
   passwordChangedAt DateTime?
-  failedLoginCount Int @default(0)
-  lockedUntil DateTime?
+  failedLoginCount  Int       @default(0)
+  lockedUntil       DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -115,8 +116,15 @@ model UserSession {
   id String @id @default(uuid())
 
   accountId String
-  userId    String
-  user      AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  activeMembershipId String?
+  activeRole         String?
+  schoolId           String?
+  branchId           String?
 
   refreshTokenHash String?
   deviceId         String?
@@ -124,16 +132,21 @@ model UserSession {
   ipAddress        String?
   userAgent        String?
 
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastSeenAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   @@index([accountId])
   @@index([userId])
+  @@index([activeMembershipId])
+  @@index([activeRole])
+  @@index([schoolId, branchId])
   @@index([deviceId])
   @@index([expiresAt])
   @@index([revokedAt])
+  @@index([lastSeenAt])
 }
 
 model UserMembership {
@@ -145,29 +158,46 @@ model UserMembership {
   userId String
   user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  role String // super_admin | admin | branch_admin | accountant | teacher | student | parent
+  role String // developer | platform_team | super_admin | school_admin | branch_admin | accountant | teacher | student | parent
 
-  // These are local Dexie IDs because schools/branches are stored in synced payloads.
-  schoolId Int?
-  branchId Int?
+  // Permanent synced string IDs from the frontend database.
+  schoolId String?
+  branchId String?
 
-  teacherLocalId Int?
-  studentLocalId Int?
-  parentLocalId  Int?
+  teacherId String?
+  studentId String?
+  parentId  String?
 
-  active Boolean @default(true)
+  // Stable application-generated identity for this membership scope.
+  // Example: student:student_uuid or branch_admin:branch_uuid.
+  scopeKey String
+
+  status    String  @default("active") // invited | active | suspended | revoked | expired
+  active    Boolean @default(true)
+  isDefault Boolean @default(false)
+  label     String?
+  metadata  Json?
+
+  invitedAt       DateTime?
+  acceptedAt      DateTime?
+  suspendedAt     DateTime?
+  endedAt         DateTime?
+  createdByUserId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([accountId, userId, scopeKey])
   @@index([accountId])
   @@index([userId])
   @@index([accountId, role])
   @@index([accountId, schoolId, branchId])
-  @@index([teacherLocalId])
-  @@index([studentLocalId])
-  @@index([parentLocalId])
+  @@index([teacherId])
+  @@index([studentId])
+  @@index([parentId])
+  @@index([status])
   @@index([active])
+  @@index([isDefault])
 }
 
 model PermissionRule {
@@ -209,7 +239,7 @@ model SyncRecord {
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   tableName String
-  localId   Int?
+  localId   String?
   cloudId   String?
   deviceId  String?
 
@@ -245,7 +275,7 @@ model SyncDevice {
   lastSeenAt DateTime?
   lastPushAt DateTime?
   lastPullAt DateTime?
-  active     Boolean @default(true)
+  active     Boolean   @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -262,7 +292,7 @@ model SyncConflict {
 
   accountId String
   tableName String
-  localId   Int?
+  localId   String?
   cloudId   String?
   deviceId  String?
 
@@ -270,13 +300,13 @@ model SyncConflict {
   status       String @default("open") // open | resolved | ignored
   severity     String @default("medium") // low | medium | high | critical
 
-  serverPayload Json?
-  clientPayload Json?
+  serverPayload     Json?
+  clientPayload     Json?
   resolutionPayload Json?
-  note String?
+  note              String?
 
-  detectedAt DateTime @default(now())
-  resolvedAt DateTime?
+  detectedAt       DateTime  @default(now())
+  resolvedAt       DateTime?
   resolvedByUserId String?
 
   @@index([accountId])
@@ -294,19 +324,19 @@ model SubscriptionPlan {
   id String @id @default(uuid())
 
   name        String
-  code        String @unique // trial | starter | standard | premium | enterprise
+  code        String  @unique // trial | starter | standard | premium | enterprise
   description String?
 
-  currency String @default("GHS")
-  priceMonthly Int @default(0)
-  priceYearly  Int @default(0)
+  currency     String @default("GHS")
+  priceMonthly Int    @default(0)
+  priceYearly  Int    @default(0)
 
-  maxSchools   Int?
-  maxBranches  Int?
-  maxUsers     Int?
-  maxStudents  Int?
-  maxTeachers  Int?
-  maxStorageMb Int?
+  maxSchools          Int?
+  maxBranches         Int?
+  maxUsers            Int?
+  maxStudents         Int?
+  maxTeachers         Int?
+  maxStorageMb        Int?
   maxApiCallsPerMonth Int?
 
   offlineSync       Boolean @default(true)
@@ -322,7 +352,7 @@ model SubscriptionPlan {
   prioritySupport   Boolean @default(false)
 
   features Json?
-  active Boolean @default(true)
+  active   Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -336,7 +366,7 @@ model SubscriptionPlan {
 model AccountSubscription {
   id String @id @default(uuid())
 
-  accountId String @unique
+  accountId String  @unique
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   planId String
@@ -381,19 +411,19 @@ model Invoice {
   invoiceNumber String @unique
   currency      String @default("GHS")
 
-  subtotal Int
-  discount Int @default(0)
-  tax      Int @default(0)
-  total    Int
+  subtotal   Int
+  discount   Int @default(0)
+  tax        Int @default(0)
+  total      Int
   amountPaid Int @default(0)
   balance    Int @default(0)
 
-  status String @default("draft") // draft | issued | part_paid | paid | void | overdue | cancelled
-  issueDate DateTime @default(now())
-  dueDate DateTime?
-  paidAt  DateTime?
+  status    String    @default("draft") // draft | issued | part_paid | paid | void | overdue | cancelled
+  issueDate DateTime  @default(now())
+  dueDate   DateTime?
+  paidAt    DateTime?
 
-  note String?
+  note     String?
   metadata Json?
 
   createdAt DateTime @default(now())
@@ -429,18 +459,18 @@ model AppPayment {
   status String @default("pending") // pending | processing | paid | failed | refunded | cancelled
 
   providerReference String?
-  accessCode         String?
-  authorizationUrl   String?
-  receiptNumber      String?
-  payerName          String?
-  payerPhone         String?
-  payerEmail         String?
+  accessCode        String?
+  authorizationUrl  String?
+  receiptNumber     String?
+  payerName         String?
+  payerPhone        String?
+  payerEmail        String?
 
-  paidAt DateTime?
-  failedAt DateTime?
+  paidAt      DateTime?
+  failedAt    DateTime?
   cancelledAt DateTime?
-  note   String?
-  metadata Json?
+  note        String?
+  metadata    Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -466,14 +496,14 @@ model PaymentProviderEvent {
   paymentId String?
   payment   AppPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
-  provider String // paystack | hubtel | flutterwave | manual
-  eventType String
+  provider          String // paystack | hubtel | flutterwave | manual
+  eventType         String
   providerReference String?
 
-  rawPayload Json
-  processed Boolean @default(false)
+  rawPayload  Json
+  processed   Boolean   @default(false)
   processedAt DateTime?
-  error String?
+  error       String?
 
   createdAt DateTime @default(now())
 
@@ -515,20 +545,20 @@ model ApiClient {
 
   name        String
   description String?
-  clientType  String @default("internal") // internal | partner | school_app | learn_app | business_app | external
+  clientType  String  @default("internal") // internal | partner | school_app | learn_app | business_app | external
 
   allowedOrigins Json?
   allowedIps     Json?
   scopes         Json?
 
-  active Boolean @default(true)
+  active     Boolean   @default(true)
   lastUsedAt DateTime?
 
   createdByUserId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  apiKeys ApiKey[]
+  apiKeys  ApiKey[]
   webhooks Webhook[]
 
   @@index([accountId])
@@ -551,15 +581,15 @@ model ApiKey {
   keyHash   String @unique
   scopes    Json?
 
-  active Boolean @default(true)
-  expiresAt DateTime?
-  lastUsedAt DateTime?
-  revokedAt DateTime?
+  active          Boolean   @default(true)
+  expiresAt       DateTime?
+  lastUsedAt      DateTime?
+  revokedAt       DateTime?
   revokedByUserId String?
 
   createdByUserId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([accountId])
   @@index([clientId])
@@ -578,20 +608,20 @@ model Webhook {
   clientId String?
   client   ApiClient? @relation(fields: [clientId], references: [id], onDelete: SetNull)
 
-  name String
-  url  String
+  name       String
+  url        String
   secretHash String?
 
   events Json // e.g. ["student.created", "payment.paid", "report.published"]
   active Boolean @default(true)
 
-  maxRetries Int @default(3)
-  timeoutSeconds Int @default(20)
+  maxRetries      Int       @default(3)
+  timeoutSeconds  Int       @default(20)
   lastTriggeredAt DateTime?
 
   createdByUserId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   logs WebhookLog[]
 
@@ -610,15 +640,15 @@ model WebhookLog {
   webhookId String?
   webhook   Webhook? @relation(fields: [webhookId], references: [id], onDelete: SetNull)
 
-  eventType String
-  targetUrl String
+  eventType      String
+  targetUrl      String
   requestPayload Json?
   responseStatus Int?
-  responseBody String?
-  error String?
+  responseBody   String?
+  error          String?
 
-  attempt Int @default(1)
-  status String @default("pending") // pending | success | failed | retrying
+  attempt     Int       @default(1)
+  status      String    @default("pending") // pending | success | failed | retrying
   deliveredAt DateTime?
   nextRetryAt DateTime?
 
@@ -643,15 +673,15 @@ model IntegrationMapping {
 
   entityType String // student | teacher | class | subject | classSubject | course | enrollment | assessment
 
-  localTable String?
-  localId    Int?
+  localTable   String?
+  localId      String?
   localCloudId String?
 
-  externalId String
+  externalId  String
   externalRef String?
-  metadata Json?
+  metadata    Json?
 
-  active Boolean @default(true)
+  active    Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -679,16 +709,16 @@ model AuditLog {
   actorEmail  String?
   actorRole   String?
 
-  action String // create | update | delete | login | logout | export | import | publish | approve | pay | sync
-  moduleKey String?
+  action     String // create | update | delete | login | logout | export | import | publish | approve | pay | sync
+  moduleKey  String?
   entityType String?
   entityId   String?
 
-  schoolId Int?
-  branchId Int?
+  schoolId String?
+  branchId String?
 
-  before Json?
-  after  Json?
+  before   Json?
+  after    Json?
   metadata Json?
 
   ipAddress String?
@@ -712,25 +742,25 @@ model BackgroundJob {
   accountId String?
   account   Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  type String // sync_push | sync_pull | report_generation | payment_verify | webhook_dispatch | backup | import | export
-  status String @default("queued") // queued | running | completed | failed | cancelled
-  priority Int @default(5)
+  type     String // sync_push | sync_pull | report_generation | payment_verify | webhook_dispatch | backup | import | export
+  status   String @default("queued") // queued | running | completed | failed | cancelled
+  priority Int    @default(5)
 
   payload Json?
   result  Json?
   error   String?
 
-  attempts Int @default(0)
+  attempts    Int @default(0)
   maxAttempts Int @default(3)
 
   scheduledAt DateTime?
-  startedAt DateTime?
+  startedAt   DateTime?
   completedAt DateTime?
-  failedAt DateTime?
+  failedAt    DateTime?
 
   createdByUserId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([accountId])
   @@index([type])
@@ -743,21 +773,21 @@ model BackgroundJob {
 model StorageUsage {
   id String @id @default(uuid())
 
-  accountId String @unique
+  accountId String  @unique
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   usedBytes BigInt @default(0)
-  usedMb    Int @default(0)
+  usedMb    Int    @default(0)
   limitMb   Int?
 
-  imageBytes BigInt @default(0)
+  imageBytes    BigInt @default(0)
   documentBytes BigInt @default(0)
-  backupBytes BigInt @default(0)
-  otherBytes BigInt @default(0)
+  backupBytes   BigInt @default(0)
+  otherBytes    BigInt @default(0)
 
   lastCalculatedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([usedMb])
   @@index([limitMb])
@@ -769,9 +799,9 @@ model AccountFeatureFlag {
   accountId String
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  key String
-  enabled Boolean @default(false)
-  value Json?
+  key         String
+  enabled     Boolean @default(false)
+  value       Json?
   description String?
 
   createdAt DateTime @default(now())
@@ -789,10 +819,10 @@ model AccountSystemSetting {
   accountId String
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  key String
-  value Json
+  key         String
+  value       Json
   description String?
-  locked Boolean @default(false)
+  locked      Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -813,30 +843,30 @@ model NotificationDeliveryLog {
   accountId String?
   account   Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  schoolId Int?
-  branchId Int?
+  schoolId String?
+  branchId String?
 
   channel String // in_app | sms | email | whatsapp | push
   purpose String // announcement | message | fee_reminder | payroll | attendance | report | custom
 
   recipientUserId String?
-  recipientType String?
-  recipientLocalId Int?
-  recipientName String?
-  recipientPhone String?
-  recipientEmail String?
+  recipientType   String?
+  recipientId     String?
+  recipientName   String?
+  recipientPhone  String?
+  recipientEmail  String?
 
   subject String?
   body    String?
 
-  status String @default("queued") // queued | sent | delivered | read | failed
-  provider String?
+  status            String  @default("queued") // queued | sent | delivered | read | failed
+  provider          String?
   providerReference String?
 
-  sentAt DateTime?
-  deliveredAt DateTime?
-  readAt DateTime?
-  failedAt DateTime?
+  sentAt       DateTime?
+  deliveredAt  DateTime?
+  readAt       DateTime?
+  failedAt     DateTime?
   failedReason String?
 
   metadata Json?
@@ -849,7 +879,7 @@ model NotificationDeliveryLog {
   @@index([channel])
   @@index([purpose])
   @@index([recipientUserId])
-  @@index([recipientType, recipientLocalId])
+  @@index([recipientType, recipientId])
   @@index([status])
   @@index([providerReference])
   @@index([createdAt])

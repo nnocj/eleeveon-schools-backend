@@ -1,5 +1,4 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString } from "class-validator";
-import { Type } from "class-transformer";
+import { IsBoolean, IsIn, IsOptional, IsString } from "class-validator";
 import { ALL_APP_ROLES } from "../../common/roles";
 
 export class CreateMembershipDto {
@@ -10,29 +9,24 @@ export class CreateMembershipDto {
   role!: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  schoolId?: number;
+  @IsString()
+  schoolId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  branchId?: number;
+  @IsString()
+  branchId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  teacherLocalId?: number;
+  @IsString()
+  teacherId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  studentLocalId?: number;
+  @IsString()
+  studentId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  parentLocalId?: number;
+  @IsString()
+  parentId?: string;
 }
 
 export class UpdateMembershipDto {
@@ -41,29 +35,24 @@ export class UpdateMembershipDto {
   role?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  schoolId?: number | null;
+  @IsString()
+  schoolId?: string | null;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  branchId?: number | null;
+  @IsString()
+  branchId?: string | null;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  teacherLocalId?: number | null;
+  @IsString()
+  teacherId?: string | null;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  studentLocalId?: number | null;
+  @IsString()
+  studentId?: string | null;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  parentLocalId?: number | null;
+  @IsString()
+  parentId?: string | null;
 
   @IsOptional()
   @IsBoolean()

@@ -1,15 +1,22 @@
+
 /**
  * src/media/media.controller.ts
  * --------------------------------------------------------------------------
  * POST /media/upload
  * GET  /media/files/:accountId/:filename
+ *
+ * Notes:
+ * - uploads require an authenticated account;
+ * - req.user.accountId remains authoritative;
+ * - uploaded files are held in memory before MediaStorageService persists them;
+ * - generated media filenames are immutable and browser-cacheable;
+ * - the configured upload limit is shared with MEDIA_MAX_FILE_SIZE_BYTES.
  */
 
 import {
   Body,
   Controller,
   Get,
-  Header,
   Param,
   Post,
   Req,
@@ -28,6 +35,7 @@ import {
 } from "multer";
 
 import type {
+  Request,
   Response,
 } from "express";
 
@@ -51,16 +59,28 @@ import {
   MediaStorageService,
 } from "./media-storage.service";
 
-type AuthenticatedRequest = {
-  user: AuthUser;
-  protocol?: string;
-  headers?: {
-    host?: string;
-    "x-forwarded-proto"?: string;
-    "x-forwarded-host"?: string;
+type AuthenticatedRequest =
+  Request & {
+    user: AuthUser;
   };
-  get?: (name: string) => string | undefined;
-};
+
+const DEFAULT_MEDIA_MAX_FILE_SIZE_BYTES =
+  8 * 1024 * 1024;
+
+function configuredUploadLimit() {
+  const configured =
+    Number(
+      process.env
+        .MEDIA_MAX_FILE_SIZE_BYTES,
+    );
+
+  return Number.isFinite(
+    configured,
+  ) &&
+    configured > 0
+    ? configured
+    : DEFAULT_MEDIA_MAX_FILE_SIZE_BYTES;
+}
 
 @Controller("media")
 export class MediaController {
@@ -71,7 +91,9 @@ export class MediaController {
       MediaStorageService,
   ) {}
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(
+    JwtAuthGuard,
+  )
   @Post("upload")
   @UseInterceptors(
     FileInterceptor(
@@ -81,17 +103,19 @@ export class MediaController {
           memoryStorage(),
         limits: {
           fileSize:
-            8 * 1024 * 1024,
+            configuredUploadLimit(),
           files: 1,
         },
       },
     ),
   )
-  upload(
+  async upload(
     @Req()
     req: AuthenticatedRequest,
+
     @UploadedFile()
-    file: any,
+    file: Express.Multer.File,
+
     @Body()
     dto: MediaUploadDto,
   ) {
@@ -106,10 +130,17 @@ export class MediaController {
   }
 
   /**
-   * Browser-readable URL.
+   * Browser-readable immutable media URL.
    *
-   * The generated filename is an unguessable UUID. If you later require private
-   * media, replace this with signed URLs from object storage.
+   * The filename is generated using a UUID and cannot be chosen by the client.
+   * This endpoint is suitable for public or browser-readable media such as:
+   * - school logos;
+   * - branch logos;
+   * - profile photographs;
+   * - report branding images.
+   *
+   * Private files should later be moved behind authenticated access or signed
+   * object-storage URLs.
    */
   @Get(
     "files/:accountId/:filename",
@@ -117,8 +148,10 @@ export class MediaController {
   async file(
     @Param("accountId")
     accountId: string,
+
     @Param("filename")
     filename: string,
+
     @Res()
     response: Response,
   ) {
@@ -126,6 +159,12 @@ export class MediaController {
       await this.storage.open(
         accountId,
         filename,
+      );
+
+    const safeDownloadName =
+      filename.replace(
+        /["\\\r\n]/g,
+        "_",
       );
 
     response.setHeader(
@@ -141,8 +180,34 @@ export class MediaController {
     );
 
     response.setHeader(
+      "X-Content-Type-Options",
+      "nosniff",
+    );
+
+    response.setHeader(
+      "Content-Disposition",
+      `inline; filename="${safeDownloadName}"`,
+    );
+
+    response.setHeader(
       "Cache-Control",
       "public, max-age=31536000, immutable",
+    );
+
+    opened.stream.once(
+      "error",
+      () => {
+        if (
+          !response.headersSent
+        ) {
+          response
+            .status(500)
+            .end();
+          return;
+        }
+
+        response.destroy();
+      },
     );
 
     opened.stream.pipe(
@@ -154,22 +219,18 @@ export class MediaController {
     req: AuthenticatedRequest,
   ) {
     const forwardedProtocol =
-      String(
-        req.headers?.[
+      this.firstForwardedValue(
+        req.headers[
           "x-forwarded-proto"
-        ] || "",
-      )
-        .split(",")[0]
-        .trim();
+        ],
+      );
 
     const forwardedHost =
-      String(
-        req.headers?.[
+      this.firstForwardedValue(
+        req.headers[
           "x-forwarded-host"
-        ] || "",
-      )
-        .split(",")[0]
-        .trim();
+        ],
+      );
 
     const protocol =
       forwardedProtocol ||
@@ -178,10 +239,28 @@ export class MediaController {
 
     const host =
       forwardedHost ||
-      req.get?.("host") ||
-      req.headers?.host ||
+      req.get("host") ||
+      req.headers.host ||
       "localhost:4000";
 
     return `${protocol}://${host}`;
+  }
+
+  private firstForwardedValue(
+    value:
+      | string
+      | string[]
+      | undefined,
+  ) {
+    const normalized =
+      Array.isArray(value)
+        ? value[0]
+        : value;
+
+    return String(
+      normalized || "",
+    )
+      .split(",")[0]
+      .trim();
   }
 }

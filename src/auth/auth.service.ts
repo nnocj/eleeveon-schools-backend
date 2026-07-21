@@ -14,15 +14,19 @@ import {
   RegisterDto,
 } from "./dto/auth.dto";
 
+
 export type LightweightMembership = {
   id: string;
   accountId: string;
   role: string;
-  schoolId: number | null;
-  branchId: number | null;
-  teacherLocalId: number | null;
-  studentLocalId: number | null;
-  parentLocalId: number | null;
+
+  schoolId: string | null;
+  branchId: string | null;
+
+  teacherId: string | null;
+  studentId: string | null;
+  parentId: string | null;
+
   active: boolean;
 };
 
@@ -180,9 +184,37 @@ export class AuthService {
                 userId: user.id,
                 role:
                   "super_admin",
+
+                // Stable account-level membership identity required by Prisma.
+                // This remains deterministic if the registration request is retried.
+                scopeKey:
+                  `super_admin:account:${account.id}`,
+
                 active: true,
+                isDefault: true,
+                status: "active",
               },
             });
+
+          /**
+           * Verify that the newly-created account is visible inside the same
+           * interactive transaction before inserting account-owned defaults.
+           */
+          const accountInsideTransaction =
+            await tx.account.findUnique({
+              where: {
+                id: account.id,
+              },
+              select: {
+                id: true,
+              },
+            });
+
+          if (!accountInsideTransaction) {
+            throw new Error(
+              `Account ${account.id} was created but is not visible inside the registration transaction.`,
+            );
+          }
 
           await this.seedDefaultPermissionRules(
             tx,
@@ -542,14 +574,14 @@ export class AuthService {
           branchId:
             membership.branchId ??
             null,
-          teacherLocalId:
-            membership.teacherLocalId ??
+          teacherId:
+            membership.teacherId ??
             null,
-          studentLocalId:
-            membership.studentLocalId ??
+          studentId:
+            membership.studentId ??
             null,
-          parentLocalId:
-            membership.parentLocalId ??
+          parentId:
+            membership.parentId ??
             null,
           active:
             membership.active !==
@@ -598,143 +630,115 @@ export class AuthService {
   private async seedDefaultPermissionRules(
     tx: any,
     accountId: string,
-  ) {
+  ): Promise<void> {
     const modules = [
-      [
-        "schools",
-        "Schools",
-        "yes",
-        "yes",
-        "no",
-        "no",
-        "no",
-        "no",
-        "no",
-      ],
-      [
-        "branches",
-        "Branches",
-        "yes",
-        "yes",
-        "yes",
-        "no",
-        "no",
-        "no",
-        "no",
-      ],
-      [
-        "users",
-        "Users & Memberships",
-        "yes",
-        "yes",
-        "yes",
-        "no",
-        "no",
-        "no",
-        "no",
-      ],
-      [
-        "academics",
-        "Academic Setup",
-        "yes",
-        "yes",
-        "yes",
-        "no",
-        "no",
-        "no",
-        "no",
-      ],
-      [
-        "attendance",
-        "Attendance",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "no",
-      ],
-      [
-        "assessment",
-        "Assessment",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "no",
-      ],
-      [
-        "reports",
-        "Reports",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-        "yes",
-      ],
-      [
-        "finance",
-        "Finance",
-        "yes",
-        "yes",
-        "yes",
-        "no",
-        "no",
-        "yes",
-        "yes",
-      ],
-      [
-        "settings",
-        "Settings",
-        "yes",
-        "yes",
-        "yes",
-        "no",
-        "no",
-        "no",
-        "no",
-      ],
+      {
+        moduleKey: "schools",
+        moduleLabel: "Schools",
+        owner: "yes",
+        admin: "yes",
+        branch: "no",
+        teacher: "no",
+        student: "no",
+        parent: "no",
+        accountant: "no",
+      },
+      {
+        moduleKey: "branches",
+        moduleLabel: "Branches",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "no",
+        student: "no",
+        parent: "no",
+        accountant: "no",
+      },
+      {
+        moduleKey: "users",
+        moduleLabel: "Users & Memberships",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "no",
+        student: "no",
+        parent: "no",
+        accountant: "no",
+      },
+      {
+        moduleKey: "academics",
+        moduleLabel: "Academic Setup",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "no",
+        student: "no",
+        parent: "no",
+        accountant: "no",
+      },
+      {
+        moduleKey: "attendance",
+        moduleLabel: "Attendance",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "yes",
+        student: "yes",
+        parent: "yes",
+        accountant: "no",
+      },
+      {
+        moduleKey: "assessment",
+        moduleLabel: "Assessment",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "yes",
+        student: "yes",
+        parent: "yes",
+        accountant: "no",
+      },
+      {
+        moduleKey: "reports",
+        moduleLabel: "Reports",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "yes",
+        student: "yes",
+        parent: "yes",
+        accountant: "yes",
+      },
+      {
+        moduleKey: "finance",
+        moduleLabel: "Finance",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "no",
+        student: "no",
+        parent: "yes",
+        accountant: "yes",
+      },
+      {
+        moduleKey: "settings",
+        moduleLabel: "Settings",
+        owner: "yes",
+        admin: "yes",
+        branch: "yes",
+        teacher: "no",
+        student: "no",
+        parent: "no",
+        accountant: "no",
+      },
     ];
 
-    for (
-      const [
-        moduleKey,
-        moduleLabel,
-        owner,
-        admin,
-        branch,
-        teacher,
-        student,
-        parent,
-        accountant,
-      ] of modules
-    ) {
-      await tx.permissionRule.upsert({
-        where: {
-          accountId_moduleKey: {
-            accountId,
-            moduleKey,
-          },
-        },
-        update: {},
-        create: {
-          accountId,
-          moduleKey,
-          moduleLabel,
-          owner,
-          admin,
-          branch,
-          teacher,
-          student,
-          parent,
-          accountant,
-        },
-      });
-    }
+    await tx.permissionRule.createMany({
+      data: modules.map((module) => ({
+        accountId,
+        ...module,
+      })),
+      skipDuplicates: true,
+    });
   }
 }

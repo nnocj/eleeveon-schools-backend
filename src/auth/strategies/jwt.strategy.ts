@@ -177,14 +177,14 @@ export class JwtStrategy
           branchId:
             membership.branchId ??
             null,
-          teacherLocalId:
-            membership.teacherLocalId ??
+          teacherId:
+            membership.teacherId ??
             null,
-          studentLocalId:
-            membership.studentLocalId ??
+          studentId:
+            membership.studentId ??
             null,
-          parentLocalId:
-            membership.parentLocalId ??
+          parentId:
+            membership.parentId ??
             null,
           active:
             membership.active !==
