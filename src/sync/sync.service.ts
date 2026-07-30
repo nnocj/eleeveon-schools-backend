@@ -83,7 +83,41 @@ const LOCAL_FIRST_TABLES = new Set([
   "assessmentEntries",
   "computedResults",
   "attendance",
+  "studentAttendanceSummaries",
   "teacherAttendance",
+
+  // Attendance identity and verification subsystem.
+  // Keep aligned with frontend db.ts and syncTables.ts.
+  "attendanceSessions",
+  "attendanceDevices",
+  "attendanceCredentials",
+  "attendanceCredentialEvents",
+  "attendanceCaptureEvents",
+  "attendanceEvidenceAssets",
+
+  // Shared identity, safety, pickup, visitor, transport and emergency platform.
+  // Keep aligned with frontend db.ts and syncTables.ts.
+  "identityCredentials",
+  "identityCredentialDesignSettings",
+  "identityCredentialEvents",
+  "identityDevices",
+  "identityAccessPoints",
+  "identityActivityEvents",
+  "identityEvidenceAssets",
+  "studentIdentityCards",
+  "pickupAuthorizations",
+  "studentPickupEvents",
+  "visitorProfiles",
+  "visitorVisits",
+  "schoolVehicles",
+  "transportRoutes",
+  "transportStops",
+  "studentTransportAssignments",
+  "transportJourneys",
+  "transportJourneyEvents",
+  "emergencyRollCallSessions",
+  "emergencyRollCallEntries",
+
   "reportCards",
   "reportCardItems",
 
@@ -216,7 +250,40 @@ const BRANCH_REQUIRED_TABLES = new Set([
   "assessmentEntries",
   "computedResults",
   "attendance",
+  "studentAttendanceSummaries",
   "teacherAttendance",
+
+  // Branch-scoped attendance identity and verification records.
+  "attendanceSessions",
+  "attendanceDevices",
+  "attendanceCredentials",
+  "attendanceCredentialEvents",
+  "attendanceCaptureEvents",
+  "attendanceEvidenceAssets",
+
+  // Shared identity, safety, pickup, visitor, transport and emergency platform.
+  // Keep aligned with frontend db.ts and syncTables.ts.
+  "identityCredentials",
+  "identityCredentialDesignSettings",
+  "identityCredentialEvents",
+  "identityDevices",
+  "identityAccessPoints",
+  "identityActivityEvents",
+  "identityEvidenceAssets",
+  "studentIdentityCards",
+  "pickupAuthorizations",
+  "studentPickupEvents",
+  "visitorProfiles",
+  "visitorVisits",
+  "schoolVehicles",
+  "transportRoutes",
+  "transportStops",
+  "studentTransportAssignments",
+  "transportJourneys",
+  "transportJourneyEvents",
+  "emergencyRollCallSessions",
+  "emergencyRollCallEntries",
+
   "reportCards",
   "reportCardItems",
   "studentReportSnapshots",
@@ -338,6 +405,15 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
     "assessmentStructures",
     "assessmentStructureItems",
     "assessmentApplicabilities",
+    "teacherAttendance",
+    "identityCredentials",
+    "identityCredentialDesignSettings",
+    "identityCredentialEvents",
+    "identityActivityEvents",
+    "identityDevices",
+    "identityAccessPoints",
+    "emergencyRollCallSessions",
+    "emergencyRollCallEntries",
   ],
   student: [
     "schools",
@@ -350,9 +426,23 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
     "subjects",
     "classSubjects",
     "computedResults",
+    "studentAttendanceSummaries",
     "reportCards",
     "reportCardItems",
     "announcements",
+    "identityCredentials",
+    "identityCredentialDesignSettings",
+    "identityCredentialEvents",
+    "identityActivityEvents",
+    "studentIdentityCards",
+    "studentTransportAssignments",
+    "transportJourneys",
+    "transportJourneyEvents",
+    "schoolVehicles",
+    "transportRoutes",
+    "transportStops",
+    "emergencyRollCallSessions",
+    "emergencyRollCallEntries",
   ],
   parent: [
     "schools",
@@ -364,9 +454,24 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
     "studentEnrollments",
     "classes",
     "computedResults",
+    "studentAttendanceSummaries",
     "reportCards",
     "reportCardItems",
     "announcements",
+    "identityCredentials",
+    "identityCredentialDesignSettings",
+    "identityCredentialEvents",
+    "identityActivityEvents",
+    "pickupAuthorizations",
+    "studentPickupEvents",
+    "studentTransportAssignments",
+    "transportJourneys",
+    "transportJourneyEvents",
+    "schoolVehicles",
+    "transportRoutes",
+    "transportStops",
+    "emergencyRollCallSessions",
+    "emergencyRollCallEntries",
   ],
   accountant: [...LOCAL_FIRST_TABLES],
 };
@@ -376,7 +481,7 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
  * Administrative workspaces must not open with a silently truncated branch.
  * HTTP body limits and infrastructure limits should be configured separately.
  */
-const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 2;
+const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 1;
 
 
 @Injectable()
@@ -1843,11 +1948,19 @@ export class SyncService {
         "schools",
         "branches",
         "schoolBranchSettings",
+        "identityCredentialDesignSettings",
         "academicPeriods",
         "classes",
         "subjects",
         "classSubjects",
         "announcements",
+        "identityDevices",
+        "identityAccessPoints",
+        "schoolVehicles",
+        "transportRoutes",
+        "transportStops",
+        "transportJourneys",
+        "emergencyRollCallSessions",
       ]);
 
     if (
@@ -1864,17 +1977,30 @@ export class SyncService {
         any
       >;
 
+    const directStudentId = this.cleanId(
+      payload.studentId ||
+        (
+          record.tableName === "students"
+            ? payload.id || record.localId
+            : undefined
+        ),
+    );
+
+    if (directStudentId === studentId) {
+      return true;
+    }
+
+    const identitySubjectId = this.cleanId(
+      payload.subjectId || payload.personId,
+    );
+
+    const identitySubjectType = String(
+      payload.subjectType || payload.personType || "",
+    ).toLowerCase();
+
     return (
-      this.cleanId(
-        payload.studentId ||
-          (
-            record.tableName ===
-            "students"
-              ? payload.id ||
-                record.localId
-              : undefined
-          ),
-      ) === studentId
+      identitySubjectId === studentId &&
+      identitySubjectType === "student"
     );
   }
 
@@ -1889,9 +2015,17 @@ export class SyncService {
         "schools",
         "branches",
         "schoolBranchSettings",
+        "identityCredentialDesignSettings",
         "academicPeriods",
         "classes",
         "announcements",
+        "identityDevices",
+        "identityAccessPoints",
+        "schoolVehicles",
+        "transportRoutes",
+        "transportStops",
+        "transportJourneys",
+        "emergencyRollCallSessions",
       ]);
 
     if (
@@ -1939,11 +2073,43 @@ export class SyncService {
           ),
       );
 
-    return Boolean(
+    if (
       studentId &&
-      childStudentIds.has(
-        studentId,
-      ),
+      childStudentIds.has(studentId)
+    ) {
+      return true;
+    }
+
+    const subjectId = this.cleanId(
+      payload.subjectId || payload.personId,
+    );
+
+    const subjectType = String(
+      payload.subjectType || payload.personType || "",
+    ).toLowerCase();
+
+    if (
+      subjectType === "parent" &&
+      subjectId === parentId
+    ) {
+      return true;
+    }
+
+    if (
+      subjectType === "student" &&
+      subjectId &&
+      childStudentIds.has(subjectId)
+    ) {
+      return true;
+    }
+
+    const authorizedPersonId = this.cleanId(
+      payload.authorizedPersonId ||
+        payload.collectorSubjectId,
+    );
+
+    return Boolean(
+      authorizedPersonId === parentId,
     );
   }
 
@@ -1965,6 +2131,9 @@ export class SyncService {
         "assessmentStructures",
         "assessmentStructureItems",
         "assessmentApplicabilities",
+        "identityDevices",
+        "identityAccessPoints",
+        "emergencyRollCallSessions",
       ]);
 
     if (
@@ -1981,10 +2150,23 @@ export class SyncService {
         any
       >;
 
+    if (
+      this.cleanId(payload.teacherId) === teacherId
+    ) {
+      return true;
+    }
+
+    const subjectId = this.cleanId(
+      payload.subjectId || payload.personId,
+    );
+
+    const subjectType = String(
+      payload.subjectType || payload.personType || "",
+    ).toLowerCase();
+
     return (
-      this.cleanId(
-        payload.teacherId,
-      ) === teacherId
+      subjectId === teacherId &&
+      ["teacher", "staff"].includes(subjectType)
     );
   }
 
