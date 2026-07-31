@@ -172,6 +172,18 @@ const LOCAL_FIRST_TABLES = new Set([
   "scheduleSessions",
   "scheduleResources",
   "scheduleConflicts",
+
+  // Public school website and template content.
+  // These must stay aligned with the frontend LOCAL_FIRST_SYNC_TABLES registry.
+  "websiteSettings",
+  "websitePages",
+  "websiteSections",
+  "websiteNavigationItems",
+  "websiteDomains",
+  "websiteDomainAliases",
+  "websiteForms",
+  "websiteFormSubmissions",
+  "websiteRevisions",
 ]);
 
 const BLOCKED_PUSH_TABLES = new Set([
@@ -231,6 +243,18 @@ const SCHOOL_REQUIRED_TABLES = new Set([
   "feeStructures",
   "schoolCurrencySettings",
   "schoolPayoutSettings",
+
+  // Public website records are school-owned. branchId is optional because a
+  // school may publish one website spanning all branches.
+  "websiteSettings",
+  "websitePages",
+  "websiteSections",
+  "websiteNavigationItems",
+  "websiteDomains",
+  "websiteDomainAliases",
+  "websiteForms",
+  "websiteFormSubmissions",
+  "websiteRevisions",
 ]);
 
 const BRANCH_REQUIRED_TABLES = new Set([
@@ -377,11 +401,31 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
     "schools",
     "branches",
     "schoolBranchSettings",
+    "websiteSettings",
+    "websitePages",
+    "websiteSections",
+    "websiteNavigationItems",
+    "websiteDomains",
+    "websiteDomainAliases",
+    "websiteForms",
+    "websiteFormSubmissions",
+    "websiteRevisions",
+    "mediaAssets",
   ],
   platform_team: [
     "schools",
     "branches",
     "schoolBranchSettings",
+    "websiteSettings",
+    "websitePages",
+    "websiteSections",
+    "websiteNavigationItems",
+    "websiteDomains",
+    "websiteDomainAliases",
+    "websiteForms",
+    "websiteFormSubmissions",
+    "websiteRevisions",
+    "mediaAssets",
   ],
   // Administrative workspaces receive the complete local-first registry.
   // Never replace these with a hand-written subset; doing so previously omitted

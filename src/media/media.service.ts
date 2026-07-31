@@ -11,7 +11,8 @@
  * - assetId is an optional string ID;
  * - ownerId is the permanent string ID of the owner record;
  * - ownerTempKey supports uploads created before an owner is finalized;
- * - ownerCloudId and ownerLocalId are no longer supported.
+ * - ownerCloudId and ownerLocalId are no longer supported;
+ * - website builder records use the same ownerTable + ownerId + fieldKey contract.
  */
 
 import {
@@ -39,6 +40,39 @@ type UploadedMediaFile = {
   buffer?: Buffer;
 };
 
+export const WEBSITE_MEDIA_OWNER_TABLES = [
+  "websiteSettings",
+  "websitePages",
+  "websiteSections",
+  "websiteNavigationItems",
+  "websiteForms",
+  "websiteTemplates",
+] as const;
+
+export const WEBSITE_MEDIA_FIELD_KEYS = [
+  "hero",
+  "heroBackground",
+  "heroMedia",
+  "heroVideo",
+  "heroPoster",
+  "sectionImage",
+  "sectionBackground",
+  "pageBanner",
+  "pageCover",
+  "favicon",
+  "ogImage",
+  "socialImage",
+  "footerLogo",
+  "gallery",
+  "galleryImage",
+  "thumbnail",
+  "poster",
+  "logo",
+  "bannerImage",
+  "background",
+  "attachment",
+] as const;
+
 const ALLOWED_OWNER_TABLES =
   new Set<string>([
     "schools",
@@ -56,6 +90,7 @@ const ALLOWED_OWNER_TABLES =
     "announcements",
     "reportCards",
     "reportCardTemplates",
+    ...WEBSITE_MEDIA_OWNER_TABLES,
   ]);
 
 const ALLOWED_FIELD_KEYS =
@@ -79,6 +114,7 @@ const ALLOWED_FIELD_KEYS =
     "background",
     "attachment",
     "receipt",
+    ...WEBSITE_MEDIA_FIELD_KEYS,
   ]);
 
 @Injectable()
