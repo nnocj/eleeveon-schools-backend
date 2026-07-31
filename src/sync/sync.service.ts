@@ -1647,6 +1647,7 @@ export class SyncService {
       ![
         "developer",
         "platform_team",
+        "super_admin",
       ].includes(role) &&
       !schoolId
     ) {
@@ -1680,6 +1681,16 @@ export class SyncService {
       throw new BadRequestException(
         "Parent workspace bootstrap requires parentId.",
       );
+    }
+
+    if (
+      [
+        "developer",
+        "platform_team",
+        "super_admin",
+      ].includes(role)
+    ) {
+      return;
     }
 
     await this.assertActorTenantAccess(
