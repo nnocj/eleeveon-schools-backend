@@ -268,3 +268,28 @@ export class ResolveSyncConflictDto {
   note?: string;
 }
 
+
+/**
+ * Phase 2 forward-compatible sync metadata.
+ *
+ * The entitlement engine is enforced in the later sync-enforcement phase.
+ * These contracts allow clients to receive quota-aware results without
+ * changing the existing push/pull request behaviour in this phase.
+ */
+export type SyncQuotaFailure = {
+  code: "SUBSCRIPTION_LIMIT_REACHED" | "SUBSCRIPTION_EXPIRED" | "FEATURE_DISABLED";
+  tableName: string;
+  localId: string;
+  resource?: string;
+  current?: number;
+  limit?: number | null;
+  requestedIncrease?: number;
+  entitlementVersion?: number;
+  message: string;
+};
+
+export type SyncEntitlementMetadata = {
+  entitlementVersion: number;
+  validUntil?: string | null;
+  status?: string;
+};

@@ -1,14 +1,34 @@
+import { Type } from "class-transformer";
 import {
+  IsArray,
   IsBoolean,
   IsDateString,
   IsEmail,
   IsIn,
   IsInt,
+  IsObject,
   IsOptional,
   IsString,
   Min,
 } from "class-validator";
-import { Type } from "class-transformer";
+import { PartialType } from "@nestjs/mapped-types";
+
+const SUBSCRIPTION_STATUSES = [
+  "trial",
+  "active",
+  "pending",
+  "past_due",
+  "expired",
+  "cancelled",
+  "suspended",
+] as const;
+
+const BILLING_CYCLES = [
+  "monthly",
+  "termly",
+  "yearly",
+  "manual",
+] as const;
 
 export class CreatePlanDto {
   @IsString()
@@ -30,6 +50,14 @@ export class CreatePlanDto {
   @Min(0)
   priceMonthly!: number;
 
+  /**
+   * Four-month subscription price.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  priceTermly!: number;
+
   @Type(() => Number)
   @IsInt()
   @Min(0)
@@ -38,33 +66,46 @@ export class CreatePlanDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   maxSchools?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   maxBranches?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   maxUsers?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   maxStudents?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   maxTeachers?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(0)
   maxStorageMb?: number;
 
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  maxApiCallsPerMonth?: number;
+
+  // Core platform capabilities.
   @IsOptional()
   @IsBoolean()
   offlineSync?: boolean;
@@ -81,6 +122,37 @@ export class CreatePlanDto {
   @IsBoolean()
   finance?: boolean;
 
+  // Operations, identity and safety.
+  @IsOptional()
+  @IsBoolean()
+  attendance?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  identityCards?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  identitySafety?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  transport?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  communications?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  calendarScheduling?: boolean;
+
+  // Public digital presence.
+  @IsOptional()
+  @IsBoolean()
+  schoolWebsites?: boolean;
+
+  // Role portals and advanced capabilities.
   @IsOptional()
   @IsBoolean()
   parentPortal?: boolean;
@@ -103,10 +175,36 @@ export class CreatePlanDto {
 
   @IsOptional()
   @IsBoolean()
+  webhooks?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  prioritySupport?: boolean;
+
+  /**
+   * Enabled feature keys used by the extensible capability system.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  features?: string[];
+
+  /**
+   * Extensible plan metadata, including metadata.featureFlags.
+   */
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsBoolean()
   active?: boolean;
 }
 
-export class UpdatePlanDto extends CreatePlanDto {}
+/**
+ * PATCH DTO: every CreatePlanDto property becomes optional.
+ */
+export class UpdatePlanDto extends PartialType(CreatePlanDto) {}
 
 export class CreateSubscriptionDto {
   @IsString()
@@ -116,11 +214,11 @@ export class CreateSubscriptionDto {
   planId!: string;
 
   @IsOptional()
-  @IsIn(["trial", "active", "pending", "past_due", "expired", "cancelled", "suspended"])
+  @IsIn(SUBSCRIPTION_STATUSES)
   status?: string;
 
   @IsOptional()
-  @IsIn(["monthly", "yearly", "manual"])
+  @IsIn(BILLING_CYCLES)
   billingCycle?: string;
 
   @IsOptional()
@@ -150,12 +248,16 @@ export class UpdateSubscriptionDto {
   planId?: string;
 
   @IsOptional()
-  @IsIn(["trial", "active", "pending", "past_due", "expired", "cancelled", "suspended"])
+  @IsIn(SUBSCRIPTION_STATUSES)
   status?: string;
 
   @IsOptional()
-  @IsIn(["monthly", "yearly", "manual"])
+  @IsIn(BILLING_CYCLES)
   billingCycle?: string;
+
+  @IsOptional()
+  @IsDateString()
+  trialStartedAt?: string;
 
   @IsOptional()
   @IsDateString()
@@ -172,6 +274,10 @@ export class UpdateSubscriptionDto {
   @IsOptional()
   @IsDateString()
   nextBillingDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  cancelledAt?: string;
 
   @IsOptional()
   @IsString()
@@ -224,41 +330,7 @@ export class CreateInvoiceDto {
   note?: string;
 }
 
-export class UpdateInvoiceDto {
-  @IsOptional()
-  @IsString()
-  currency?: string;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  subtotal?: number;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  discount?: number;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  tax?: number;
-
-  @IsOptional()
-  @IsIn(["draft", "issued", "paid", "void", "overdue"])
-  status?: string;
-
-  @IsOptional()
-  @IsDateString()
-  dueDate?: string;
-
-  @IsOptional()
-  @IsString()
-  note?: string;
-}
+export class UpdateInvoiceDto extends PartialType(CreateInvoiceDto) {}
 
 export class CreatePaymentDto {
   @IsString()
@@ -325,24 +397,4 @@ export class CreatePaymentDto {
   note?: string;
 }
 
-export class UpdatePaymentDto {
-  @IsOptional()
-  @IsIn(["pending", "paid", "failed", "refunded", "cancelled"])
-  status?: string;
-
-  @IsOptional()
-  @IsString()
-  providerReference?: string;
-
-  @IsOptional()
-  @IsString()
-  receiptNumber?: string;
-
-  @IsOptional()
-  @IsDateString()
-  paidAt?: string;
-
-  @IsOptional()
-  @IsString()
-  note?: string;
-}
+export class UpdatePaymentDto extends PartialType(CreatePaymentDto) {}

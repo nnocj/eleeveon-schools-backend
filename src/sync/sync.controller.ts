@@ -1,4 +1,7 @@
 /**
+ * Phase 2 note: existing synchronization behaviour is preserved here.
+ * Subscription quota enforcement is introduced in the dedicated enforcement phase.
+ *
  * src/sync/sync.controller.ts
  * --------------------------------------------------------------------------
  * JWT-authoritative synchronization controller with Phase 21 workspace

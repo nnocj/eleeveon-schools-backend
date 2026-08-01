@@ -16,6 +16,9 @@ import {
 } from "./dto/sync.dto";
 
 /**
+ * Phase 2 note: existing synchronization behaviour is preserved here.
+ * Subscription quota enforcement is introduced in the dedicated enforcement phase.
+ *
  * Phase 4 pull pagination:
  * - stable cursor: updatedAt + id;
  * - bounded page sizes;

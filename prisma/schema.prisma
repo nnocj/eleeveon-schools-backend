@@ -9,6 +9,8 @@
 //   notification delivery logs, and payment provider events.
 // - Designed to work with an offline-first Dexie app where synced school records
 //   use permanent string IDs inside SyncRecord payloads.
+// - Adds version-one subscription periods, quotations, entitlements, usage,
+//   private offers, pricing overrides and quota-event foundations.
 // ======================================================
 
 generator client {
@@ -54,6 +56,15 @@ model Account {
   invoices        Invoice[]
   payments        AppPayment[]
   permissionRules PermissionRule[]
+
+  // Subscription entitlement foundation — schema version 1.
+  subscriptionPeriods     SubscriptionPeriod[]
+  subscriptionChanges     SubscriptionChangeOrder[]
+  entitlement             AccountEntitlement?
+  usageSnapshot           AccountUsageSnapshot?
+  privateOfferAssignments PrivateOfferAssignment[]
+  pricingOverrides        AccountPricingOverride[]
+  quotaEvents             AccountQuotaEvent[]
 
   apiClients          ApiClient[]
   apiKeys             ApiKey[]
@@ -329,6 +340,7 @@ model SubscriptionPlan {
 
   currency     String @default("GHS")
   priceMonthly Int    @default(0)
+  priceTermly  Int    @default(0) // Four-month subscription price
   priceYearly  Int    @default(0)
 
   maxSchools          Int?
@@ -339,10 +351,24 @@ model SubscriptionPlan {
   maxStorageMb        Int?
   maxApiCallsPerMonth Int?
 
-  offlineSync       Boolean @default(true)
-  cloudBackup       Boolean @default(false)
-  reports           Boolean @default(true)
-  finance           Boolean @default(false)
+  // Core platform capabilities.
+  offlineSync Boolean @default(true)
+  cloudBackup Boolean @default(false)
+  reports     Boolean @default(true)
+  finance     Boolean @default(false)
+
+  // School operations and identity.
+  attendance         Boolean @default(false)
+  identityCards      Boolean @default(false)
+  identitySafety     Boolean @default(false)
+  transport          Boolean @default(false)
+  communications     Boolean @default(false)
+  calendarScheduling Boolean @default(false)
+
+  // Public digital presence.
+  schoolWebsites Boolean @default(false)
+
+  // Role portals and advanced capabilities.
   parentPortal      Boolean @default(false)
   studentPortal     Boolean @default(false)
   teacherPortal     Boolean @default(true)
@@ -351,16 +377,31 @@ model SubscriptionPlan {
   webhooks          Boolean @default(false)
   prioritySupport   Boolean @default(false)
 
+  // Extensible capability data.
+  // `features` may contain the enabled feature keys.
+  // `metadata.featureFlags` may preserve explicit true/false values.
   features Json?
-  active   Boolean @default(true)
+  metadata Json?
+
+  // All newly introduced subscription structures remain at version one.
+  schemaVersion Int     @default(1)
+  active        Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  subscriptions AccountSubscription[]
+  subscriptions          AccountSubscription[]     @relation("CurrentSubscriptionPlan")
+  scheduledSubscriptions AccountSubscription[]     @relation("ScheduledSubscriptionPlan")
+  subscriptionPeriods    SubscriptionPeriod[]
+  changeOrdersFrom       SubscriptionChangeOrder[] @relation("ChangeOrderFromPlan")
+  changeOrdersTo         SubscriptionChangeOrder[] @relation("ChangeOrderToPlan")
+  entitlements           AccountEntitlement[]
+  privateOffers          PrivateOffer[]
+  pricingOverrides       AccountPricingOverride[]
 
   @@index([code])
   @@index([active])
+  @@index([schemaVersion])
 }
 
 model AccountSubscription {
@@ -370,10 +411,10 @@ model AccountSubscription {
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   planId String
-  plan   SubscriptionPlan @relation(fields: [planId], references: [id])
+  plan   SubscriptionPlan @relation("CurrentSubscriptionPlan", fields: [planId], references: [id])
 
-  status       String @default("trial") // trial | active | past_due | expired | cancelled | suspended
-  billingCycle String @default("monthly") // monthly | yearly | manual
+  status       String @default("trial") // trial | pending | active | grace | past_due | expired | cancelled | suspended
+  billingCycle String @default("monthly") // monthly | termly | yearly | manual
 
   trialStartedAt DateTime?
   trialEndsAt    DateTime?
@@ -382,21 +423,422 @@ model AccountSubscription {
   currentPeriodEnd   DateTime?
   nextBillingDate    DateTime?
 
+  // Renewal and scheduled-change controls.
+  autoRenew         Boolean   @default(false)
+  cancelAtPeriodEnd Boolean   @default(false)
+  graceEndsAt       DateTime?
+
+  scheduledPlanId       String?
+  scheduledPlan         SubscriptionPlan? @relation("ScheduledSubscriptionPlan", fields: [scheduledPlanId], references: [id], onDelete: SetNull)
+  scheduledBillingCycle String?
+  scheduledChangeAt     DateTime?
+  scheduledChangeType   String? // downgrade | renewal | manual_change
+
   cancelledAt  DateTime?
   cancelReason String?
 
-  metadata Json?
+  // Incremented whenever effective access changes.
+  entitlementVersion Int   @default(1)
+  schemaVersion      Int   @default(1)
+  metadata           Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  invoices Invoice[]
-  payments AppPayment[]
+  invoices     Invoice[]
+  payments     AppPayment[]
+  periods      SubscriptionPeriod[]
+  changeOrders SubscriptionChangeOrder[]
 
   @@index([planId])
+  @@index([scheduledPlanId])
   @@index([status])
   @@index([currentPeriodEnd])
   @@index([nextBillingDate])
+  @@index([graceEndsAt])
+  @@index([scheduledChangeAt])
+  @@index([entitlementVersion])
+}
+
+model SubscriptionPeriod {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  subscriptionId String
+  subscription   AccountSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  planId String
+  plan   SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  billingCycle String
+  startsAt     DateTime
+  endsAt       DateTime
+
+  // purchase | renewal | extension | upgrade | downgrade |
+  // complimentary | trial | manual_adjustment
+  sourceType String
+  sourceId   String?
+
+  changeOrderId String?                  @unique
+  changeOrder   SubscriptionChangeOrder? @relation("ChangeOrderResultingPeriod", fields: [changeOrderId], references: [id], onDelete: SetNull)
+
+  currency       String @default("GHS")
+  listAmount     Int    @default(0)
+  amountPaid     Int    @default(0)
+  creditUsed     Int    @default(0)
+  discountAmount Int    @default(0)
+
+  status String @default("active") // scheduled | active | completed | cancelled | superseded
+
+  calculationVersion Int   @default(1)
+  schemaVersion      Int   @default(1)
+  metadata           Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([subscriptionId, startsAt, endsAt])
+  @@index([accountId])
+  @@index([subscriptionId])
+  @@index([planId])
+  @@index([status])
+  @@index([startsAt])
+  @@index([endsAt])
+  @@index([sourceType])
+}
+
+model SubscriptionChangeOrder {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  subscriptionId String?
+  subscription   AccountSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  fromPlanId String?
+  fromPlan   SubscriptionPlan? @relation("ChangeOrderFromPlan", fields: [fromPlanId], references: [id], onDelete: SetNull)
+
+  toPlanId String
+  toPlan   SubscriptionPlan @relation("ChangeOrderToPlan", fields: [toPlanId], references: [id])
+
+  privateOfferId String?
+  privateOffer   PrivateOffer? @relation(fields: [privateOfferId], references: [id], onDelete: SetNull)
+
+  pricingOverrideId String?
+  pricingOverride   AccountPricingOverride? @relation(fields: [pricingOverrideId], references: [id], onDelete: SetNull)
+
+  // new | renewal | extension | upgrade | downgrade |
+  // complimentary | manual_change
+  changeType    String
+  billingCycle  String
+  effectiveMode String   @default("immediate") // immediate | period_end
+  effectiveAt   DateTime
+
+  oldPeriodStart DateTime?
+  oldPeriodEnd   DateTime?
+  newPeriodStart DateTime
+  newPeriodEnd   DateTime
+
+  currency       String @default("GHS")
+  baseAmount     Int
+  creditAmount   Int    @default(0)
+  discountAmount Int    @default(0)
+  taxAmount      Int    @default(0)
+  amountDue      Int
+
+  // Complete server-side quotation breakdown.
+  calculation        Json
+  calculationVersion Int  @default(1)
+
+  status String @default("quoted")
+  // quoted | payment_pending | paid | scheduled | applied |
+  // cancelled | expired | failed
+
+  invoiceId String?  @unique
+  invoice   Invoice? @relation("ChangeOrderInvoice", fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  paymentId String?     @unique
+  payment   AppPayment? @relation("ChangeOrderPayment", fields: [paymentId], references: [id], onDelete: SetNull)
+
+  resultingPeriod SubscriptionPeriod? @relation("ChangeOrderResultingPeriod")
+
+  quoteExpiresAt DateTime
+  paidAt         DateTime?
+  appliedAt      DateTime?
+  cancelledAt    DateTime?
+  failureReason  String?
+
+  requestedByUserId String?
+  appliedByUserId   String?
+
+  schemaVersion Int   @default(1)
+  metadata      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([subscriptionId])
+  @@index([fromPlanId])
+  @@index([toPlanId])
+  @@index([changeType])
+  @@index([status])
+  @@index([effectiveAt])
+  @@index([quoteExpiresAt])
+  @@index([createdAt])
+}
+
+model AccountEntitlement {
+  id String @id @default(uuid())
+
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  planId String?
+  plan   SubscriptionPlan? @relation(fields: [planId], references: [id], onDelete: SetNull)
+
+  // subscription | trial | private_offer | pricing_override |
+  // complimentary | manual
+  source String
+  status String @default("active")
+  // active | trial | grace | past_due | expired | suspended | cancelled
+
+  validFrom   DateTime?
+  validUntil  DateTime?
+  graceEndsAt DateTime?
+
+  maxSchools          Int?
+  maxBranches         Int?
+  maxUsers            Int?
+  maxStudents         Int?
+  maxTeachers         Int?
+  maxStorageMb        Int?
+  maxApiCallsPerMonth Int?
+
+  featureFlags   Json
+  limitOverrides Json?
+  sourceDetails  Json?
+  metadata       Json?
+
+  // Starts at one and increases whenever effective access is rebuilt.
+  version       Int @default(1)
+  schemaVersion Int @default(1)
+
+  rebuiltAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([planId])
+  @@index([source])
+  @@index([status])
+  @@index([validUntil])
+  @@index([graceEndsAt])
+  @@index([version])
+}
+
+model AccountUsageSnapshot {
+  id String @id @default(uuid())
+
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  schools  Int @default(0)
+  branches Int @default(0)
+  users    Int @default(0)
+  students Int @default(0)
+  teachers Int @default(0)
+
+  storageBytes      BigInt @default(0)
+  storageMb         Int    @default(0)
+  apiCallsThisMonth Int    @default(0)
+
+  // Mirrors the entitlement version used when this snapshot was calculated.
+  entitlementVersion Int @default(1)
+  schemaVersion      Int @default(1)
+
+  calculatedAt      DateTime @default(now())
+  calculationSource String   @default("reconcile") // reconcile | mutation | sync | manual
+  metadata          Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([calculatedAt])
+  @@index([entitlementVersion])
+  @@index([students])
+  @@index([storageMb])
+}
+
+model PrivateOffer {
+  id String @id @default(uuid())
+
+  code        String  @unique
+  name        String
+  description String?
+
+  basePlanId String
+  basePlan   SubscriptionPlan @relation(fields: [basePlanId], references: [id])
+
+  currency     String @default("GHS")
+  priceMonthly Int?
+  priceTermly  Int?
+  priceYearly  Int?
+
+  discountType  String? // fixed | percentage | free
+  discountValue Int?
+
+  featureOverrides Json?
+  limitOverrides   Json?
+
+  validFrom  DateTime?
+  validUntil DateTime?
+
+  maxRedemptions  Int?
+  redemptionCount Int  @default(0)
+
+  // False keeps the internal offer name/details out of ordinary owner portals.
+  visibleToOwner Boolean @default(false)
+  ownerLabel     String?
+
+  active        Boolean @default(true)
+  schemaVersion Int     @default(1)
+  metadata      Json?
+
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  assignments  PrivateOfferAssignment[]
+  changeOrders SubscriptionChangeOrder[]
+
+  @@index([basePlanId])
+  @@index([active])
+  @@index([validFrom])
+  @@index([validUntil])
+}
+
+model PrivateOfferAssignment {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  offerId String
+  offer   PrivateOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
+  status String @default("active") // assigned | active | redeemed | expired | revoked
+
+  assignedAt DateTime  @default(now())
+  redeemedAt DateTime?
+  validFrom  DateTime?
+  validUntil DateTime?
+  revokedAt  DateTime?
+
+  assignedByUserId String?
+  revokedByUserId  String?
+  reason           String?
+
+  schemaVersion Int   @default(1)
+  metadata      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, offerId])
+  @@index([accountId])
+  @@index([offerId])
+  @@index([status])
+  @@index([validUntil])
+}
+
+model AccountPricingOverride {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  planId String
+  plan   SubscriptionPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  currency     String @default("GHS")
+  priceMonthly Int?
+  priceTermly  Int?
+  priceYearly  Int?
+
+  discountType  String? // fixed | percentage | free
+  discountValue Int?
+
+  featureOverrides Json?
+  limitOverrides   Json?
+
+  validFrom  DateTime?
+  validUntil DateTime?
+
+  reason String?
+  active Boolean @default(true)
+
+  createdByUserId String?
+  updatedByUserId String?
+
+  schemaVersion Int   @default(1)
+  metadata      Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  changeOrders SubscriptionChangeOrder[]
+
+  @@unique([accountId, planId])
+  @@index([accountId])
+  @@index([planId])
+  @@index([active])
+  @@index([validUntil])
+}
+
+model AccountQuotaEvent {
+  id String @id @default(uuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  resource  String // schools | branches | users | students | teachers | storageMb
+  eventType String // warning | reached | blocked | released | reconciled
+  operation String? // create | activate | restore | upload | sync_push
+
+  tableName String?
+  localId   String?
+  cloudId   String?
+  deviceId  String?
+
+  currentUsage      Int
+  limitValue        Int?
+  requestedIncrease Int  @default(0)
+  remainingBefore   Int?
+  remainingAfter    Int?
+
+  status  String  @default("open") // open | resolved | ignored
+  message String?
+  details Json?
+
+  entitlementVersion Int @default(1)
+  schemaVersion      Int @default(1)
+
+  resolvedAt       DateTime?
+  resolvedByUserId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([resource])
+  @@index([eventType])
+  @@index([status])
+  @@index([tableName, localId])
+  @@index([deviceId])
+  @@index([createdAt])
 }
 
 model Invoice {
@@ -429,7 +871,8 @@ model Invoice {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  payments AppPayment[]
+  payments    AppPayment[]
+  changeOrder SubscriptionChangeOrder? @relation("ChangeOrderInvoice")
 
   @@index([accountId])
   @@index([subscriptionId])
@@ -476,6 +919,7 @@ model AppPayment {
   updatedAt DateTime @updatedAt
 
   providerEvents PaymentProviderEvent[]
+  changeOrder    SubscriptionChangeOrder? @relation("ChangeOrderPayment")
 
   @@index([accountId])
   @@index([subscriptionId])

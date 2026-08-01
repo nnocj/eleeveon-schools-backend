@@ -7,6 +7,7 @@ import {
 
 import * as crypto from "crypto";
 
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 
 import { AuthUser } from "../common/auth-user";
@@ -27,6 +28,9 @@ import {
 } from "./dto/billing.dto";
 
 import { PaymentProviderService } from "./payment-providers/payment-provider.service";
+import { SubscriptionChangeService } from "./subscription-change.service";
+import type { CreateSubscriptionQuoteDto } from "./dto/subscription-quote.dto";
+import type { PaySubscriptionChangeDto } from "./dto/subscription-change.dto";
 
 type PaymentMethod =
   | "momo"
@@ -37,11 +41,14 @@ type PaymentMethod =
 
 type PaystackMode = "test" | "live";
 
+type BillingCycle = "monthly" | "termly" | "yearly";
+
 @Injectable()
 export class BillingService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly paymentProviderService: PaymentProviderService
+    private readonly paymentProviderService: PaymentProviderService,
+    private readonly subscriptionChanges: SubscriptionChangeService
   ) {}
 
   // =====================================================
@@ -180,6 +187,109 @@ export class BillingService {
     return "manual";
   }
 
+  private normalizeBillingCycle(value?: string): BillingCycle {
+    if (value === "termly") return "termly";
+    if (value === "yearly") return "yearly";
+    return "monthly";
+  }
+
+  /**
+   * Adds calendar months without allowing dates such as 31 January to roll
+   * into March. The result is clamped to the final valid day of the target
+   * month.
+   */
+  private addCalendarMonths(source: Date, months: number) {
+    const result = new Date(source);
+    const originalDay = result.getDate();
+
+    result.setDate(1);
+    result.setMonth(result.getMonth() + months);
+
+    const lastDayOfTargetMonth = new Date(
+      result.getFullYear(),
+      result.getMonth() + 1,
+      0
+    ).getDate();
+
+    result.setDate(Math.min(originalDay, lastDayOfTargetMonth));
+    return result;
+  }
+
+  private calculateSubscriptionPeriod(
+    billingCycle: BillingCycle,
+    startAt: Date = new Date()
+  ) {
+    const currentPeriodStart = new Date(startAt);
+
+    const currentPeriodEnd =
+      billingCycle === "yearly"
+        ? this.addCalendarMonths(currentPeriodStart, 12)
+        : billingCycle === "termly"
+          ? this.addCalendarMonths(currentPeriodStart, 4)
+          : this.addCalendarMonths(currentPeriodStart, 1);
+
+    return {
+      currentPeriodStart,
+      currentPeriodEnd,
+      nextBillingDate: new Date(currentPeriodEnd),
+    };
+  }
+
+  private subscriptionAmount(
+    plan: {
+      priceMonthly: number;
+      priceTermly?: number | null;
+      priceYearly: number;
+    },
+    billingCycle: BillingCycle
+  ) {
+    if (billingCycle === "yearly") {
+      return Number(plan.priceYearly || 0);
+    }
+
+    if (billingCycle === "termly") {
+      const configured = Number(plan.priceTermly || 0);
+      return configured > 0
+        ? configured
+        : Number(plan.priceMonthly || 0) * 4;
+    }
+
+    return Number(plan.priceMonthly || 0);
+  }
+
+  /**
+   * Normalizes plan prices before they are passed to Prisma.
+   */
+  private normalizePlanPrices(input: {
+    priceMonthly?: number | null;
+    priceTermly?: number | null;
+    priceYearly?: number | null;
+  }) {
+    const normalize = (value: number | null | undefined) => {
+      const parsed = Number(value ?? 0);
+
+      if (!Number.isFinite(parsed)) {
+        throw new BadRequestException(
+          "Subscription plan prices must be valid numbers."
+        );
+      }
+
+      return Math.max(0, Math.round(parsed));
+    };
+
+    return {
+      ...(input.priceMonthly !== undefined
+        ? { priceMonthly: normalize(input.priceMonthly) }
+        : {}),
+      ...(input.priceTermly !== undefined
+        ? { priceTermly: normalize(input.priceTermly) }
+        : {}),
+      ...(input.priceYearly !== undefined
+        ? { priceYearly: normalize(input.priceYearly) }
+        : {}),
+    };
+  }
+
   private async createBillingEvent(data: {
     accountId: string;
     type: string;
@@ -202,11 +312,33 @@ export class BillingService {
       include: {
         invoice: true,
         subscription: true,
+        changeOrder: true,
       },
     });
 
     if (!payment) {
       throw new NotFoundException("Payment not found.");
+    }
+
+    if (payment.changeOrder) {
+      await this.prisma.appPayment.update({
+        where: { id: payment.id },
+        data: { status: "paid", paidAt: payment.paidAt || new Date() },
+      });
+      if (payment.invoiceId) {
+        await this.prisma.invoice.update({
+          where: { id: payment.invoiceId },
+          data: {
+            status: "paid",
+            paidAt: payment.paidAt || new Date(),
+            amountPaid: payment.amount,
+            balance: 0,
+          },
+        });
+      }
+      return this.subscriptionChanges.applyPaidChangeOrder(
+        payment.changeOrder.id,
+      );
     }
 
     if (!payment.invoiceId || !payment.subscriptionId) {
@@ -221,10 +353,25 @@ export class BillingService {
       },
     });
 
+    const activationDate = payment.paidAt || new Date();
+    const billingCycle = this.normalizeBillingCycle(
+      payment.subscription?.billingCycle
+    );
+    const period = this.calculateSubscriptionPeriod(
+      billingCycle,
+      activationDate
+    );
+
     await this.prisma.accountSubscription.update({
       where: { id: payment.subscriptionId },
       data: {
         status: "active",
+        billingCycle,
+        currentPeriodStart: period.currentPeriodStart,
+        currentPeriodEnd: period.currentPeriodEnd,
+        nextBillingDate: period.nextBillingDate,
+        cancelledAt: null,
+        cancelReason: null,
       },
     });
 
@@ -240,6 +387,10 @@ export class BillingService {
         provider: payment.provider,
         providerReference: payment.providerReference,
         receiptNumber: payment.receiptNumber,
+        billingCycle,
+        currentPeriodStart: period.currentPeriodStart,
+        currentPeriodEnd: period.currentPeriodEnd,
+        nextBillingDate: period.nextBillingDate,
         paystackMode: this.getPaystackMode(),
       },
     });
@@ -401,12 +552,35 @@ export class BillingService {
   async createPlan(actor: AuthUser, dto: CreatePlanDto) {
     this.developerOnly(actor);
 
+    const {
+      metadata,
+      features,
+      ...planFields
+    } = dto;
+
+    const data: Prisma.SubscriptionPlanCreateInput = {
+      ...planFields,
+      ...this.normalizePlanPrices({
+        priceMonthly: dto.priceMonthly,
+        priceTermly: dto.priceTermly,
+        priceYearly: dto.priceYearly,
+      }),
+      code: dto.code.toLowerCase().trim(),
+      currency: dto.currency?.trim().toUpperCase() || "GHS",
+      ...(features !== undefined
+        ? {
+            features: features as Prisma.InputJsonValue,
+          }
+        : {}),
+      ...(metadata !== undefined
+        ? {
+            metadata: metadata as Prisma.InputJsonValue,
+          }
+        : {}),
+    };
+
     return this.prisma.subscriptionPlan.create({
-      data: {
-        ...dto,
-        code: dto.code.toLowerCase().trim(),
-        currency: dto.currency || "GHS",
-      },
+      data,
     });
   }
 
@@ -425,9 +599,44 @@ export class BillingService {
       throw new NotFoundException("Plan not found.");
     }
 
+    const {
+      metadata,
+      features,
+      ...planFields
+    } = dto;
+
+    const data: Prisma.SubscriptionPlanUpdateInput = {
+      ...planFields,
+      ...this.normalizePlanPrices({
+        priceMonthly: dto.priceMonthly,
+        priceTermly: dto.priceTermly,
+        priceYearly: dto.priceYearly,
+      }),
+      ...(dto.code
+        ? {
+            code: dto.code.toLowerCase().trim(),
+          }
+        : {}),
+      ...(dto.currency
+        ? {
+            currency: dto.currency.trim().toUpperCase(),
+          }
+        : {}),
+      ...(features !== undefined
+        ? {
+            features: features as Prisma.InputJsonValue,
+          }
+        : {}),
+      ...(metadata !== undefined
+        ? {
+            metadata: metadata as Prisma.InputJsonValue,
+          }
+        : {}),
+    };
+
     return this.prisma.subscriptionPlan.update({
       where: { id },
-      data: dto,
+      data,
     });
   }
 
@@ -494,8 +703,9 @@ export class BillingService {
       throw new BadRequestException("Plan ID is required.");
     }
 
-    const billingCycle =
-      dto.billingCycle === "yearly" ? "yearly" : "monthly";
+    const billingCycle = this.normalizeBillingCycle(
+      dto.billingCycle
+    );
 
     const method = this.normalizePaymentMethod(dto.paymentMethod);
     const provider = this.normalizeProvider(dto.provider, method);
@@ -518,22 +728,13 @@ export class BillingService {
     }
 
     const now = new Date();
-    const currentPeriodEnd = new Date(now);
-
-    if (billingCycle === "yearly") {
-      currentPeriodEnd.setFullYear(
-        currentPeriodEnd.getFullYear() + 1
-      );
-    } else {
-      currentPeriodEnd.setMonth(
-        currentPeriodEnd.getMonth() + 1
-      );
-    }
-
-    const amount = Number(
-      billingCycle === "yearly"
-        ? plan.priceYearly
-        : plan.priceMonthly
+    const period = this.calculateSubscriptionPeriod(
+      billingCycle,
+      now
+    );
+    const amount = this.subscriptionAmount(
+      plan,
+      billingCycle
     );
 
     const subscription =
@@ -543,9 +744,9 @@ export class BillingService {
           planId: plan.id,
           billingCycle,
           status: amount > 0 ? "pending" : "active",
-          currentPeriodStart: now,
-          currentPeriodEnd,
-          nextBillingDate: currentPeriodEnd,
+          currentPeriodStart: period.currentPeriodStart,
+          currentPeriodEnd: period.currentPeriodEnd,
+          nextBillingDate: period.nextBillingDate,
           cancelledAt: null,
           cancelReason: null,
         },
@@ -554,9 +755,9 @@ export class BillingService {
           planId: plan.id,
           billingCycle,
           status: amount > 0 ? "pending" : "active",
-          currentPeriodStart: now,
-          currentPeriodEnd,
-          nextBillingDate: currentPeriodEnd,
+          currentPeriodStart: period.currentPeriodStart,
+          currentPeriodEnd: period.currentPeriodEnd,
+          nextBillingDate: period.nextBillingDate,
         },
         include: { plan: true },
       });
@@ -570,6 +771,9 @@ export class BillingService {
           subscriptionId: subscription.id,
           planId: plan.id,
           billingCycle,
+          currentPeriodStart: period.currentPeriodStart,
+          currentPeriodEnd: period.currentPeriodEnd,
+          nextBillingDate: period.nextBillingDate,
         },
       });
 
@@ -591,7 +795,7 @@ export class BillingService {
         tax: 0,
         total: amount,
         status: "issued",
-        dueDate: currentPeriodEnd,
+        dueDate: period.currentPeriodEnd,
         note: `${plan.name} ${billingCycle} subscription`,
       },
     });
@@ -659,6 +863,157 @@ export class BillingService {
         provider === "paystack"
           ? "Redirect user to Paystack."
           : "Manual payment pending.",
+    };
+  }
+
+  // =====================================================
+  // VERSION-ONE SUBSCRIPTION QUOTES / CHANGE ORDERS
+  // =====================================================
+
+  async createSubscriptionQuote(
+    actor: AuthUser,
+    dto: CreateSubscriptionQuoteDto,
+  ) {
+    if (!actor.accountId) {
+      throw new BadRequestException("Account ID is missing from logged-in user.");
+    }
+
+    return this.subscriptionChanges.createQuote({
+      accountId: actor.accountId,
+      toPlanId: dto.planId,
+      billingCycle: dto.billingCycle,
+      changeType: dto.changeType,
+      effectiveMode: dto.effectiveMode,
+      privateOfferId: dto.privateOfferId,
+      pricingOverrideId: dto.pricingOverrideId,
+      taxRatePercent: dto.taxRatePercent,
+      requestedByUserId: actor.id,
+    });
+  }
+
+  getSubscriptionQuote(actor: AuthUser, id: string) {
+    return this.subscriptionChanges.getForAccount(actor.accountId, id);
+  }
+
+  cancelSubscriptionQuote(actor: AuthUser, id: string) {
+    return this.subscriptionChanges.cancel(actor.accountId, id);
+  }
+
+  async paySubscriptionQuote(
+    actor: AuthUser,
+    id: string,
+    dto: PaySubscriptionChangeDto,
+  ) {
+    const order = await this.subscriptionChanges.getForAccount(actor.accountId, id);
+
+    if (order.status !== "quoted") {
+      throw new BadRequestException(`Quotation is ${order.status}.`);
+    }
+    if (order.quoteExpiresAt <= new Date()) {
+      await this.prisma.subscriptionChangeOrder.update({
+        where: { id: order.id },
+        data: { status: "expired" },
+      });
+      throw new BadRequestException("Subscription quotation has expired.");
+    }
+
+    if (order.amountDue <= 0) {
+      await this.prisma.subscriptionChangeOrder.update({
+        where: { id: order.id },
+        data: { status: "paid", paidAt: new Date() },
+      });
+      const applied = await this.subscriptionChanges.applyPaidChangeOrder(order.id, actor.id);
+      return { changeOrder: applied, requiresPayment: false };
+    }
+
+    const method = this.normalizePaymentMethod(dto.paymentMethod);
+    const provider = this.normalizeProvider(dto.provider, method);
+    if (provider === "paystack" && !dto.payerEmail) {
+      throw new BadRequestException("Payer email is required for Paystack payments.");
+    }
+
+    const invoice = await this.prisma.invoice.create({
+      data: {
+        accountId: actor.accountId,
+        subscriptionId: order.subscriptionId,
+        invoiceNumber: `INV-${Date.now()}`,
+        currency: order.currency,
+        subtotal: order.baseAmount,
+        discount: order.creditAmount + order.discountAmount,
+        tax: order.taxAmount,
+        total: order.amountDue,
+        amountPaid: 0,
+        balance: order.amountDue,
+        status: "issued",
+        dueDate: order.quoteExpiresAt,
+        note: `${order.changeType} subscription change`,
+        metadata: { changeOrderId: order.id },
+      },
+    });
+
+    const payment = await this.prisma.appPayment.create({
+      data: {
+        accountId: actor.accountId,
+        subscriptionId: order.subscriptionId,
+        invoiceId: invoice.id,
+        amount: order.amountDue,
+        currency: order.currency,
+        method,
+        provider,
+        status: "pending",
+        payerName: dto.payerName || null,
+        payerPhone: dto.payerPhone || null,
+        payerEmail: dto.payerEmail || null,
+        note: `${order.changeType} subscription payment`,
+        metadata: { changeOrderId: order.id },
+      },
+    });
+
+    await this.subscriptionChanges.markPaymentPending(order.id, invoice.id, payment.id);
+
+    if (provider !== "paystack") {
+      return { changeOrderId: order.id, invoice, payment, requiresPayment: true };
+    }
+
+    const providerResponse = await this.paymentProviderService.initializePayment({
+      accountId: actor.accountId,
+      amount: order.amountDue,
+      currency: order.currency,
+      channel: method,
+      provider: "paystack",
+      paymentId: payment.id,
+      invoiceId: invoice.id,
+      subscriptionId: order.subscriptionId || undefined,
+      payerName: dto.payerName,
+      payerPhone: dto.payerPhone,
+      payerEmail: dto.payerEmail,
+      momoNetwork: dto.momoNetwork,
+      callbackUrl: this.getPaystackCallbackUrl() || undefined,
+      metadata: {
+        changeOrderId: order.id,
+        paymentId: payment.id,
+        billingCycle: order.billingCycle,
+        changeType: order.changeType,
+        paystackMode: this.getPaystackMode(),
+      },
+    });
+
+    const refreshed = await this.prisma.appPayment.update({
+      where: { id: payment.id },
+      data: {
+        providerReference: providerResponse.providerReference,
+        authorizationUrl: providerResponse.authorizationUrl,
+        accessCode: providerResponse.accessCode,
+      },
+    });
+
+    return {
+      changeOrderId: order.id,
+      invoice,
+      payment: refreshed,
+      providerResponse,
+      requiresPayment: true,
+      authorizationUrl: providerResponse.authorizationUrl,
     };
   }
 
