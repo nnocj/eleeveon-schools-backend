@@ -29,9 +29,26 @@ export class PublicWebsitesService {
 
   private publicMedia(row?: AnyRow) {
     if (!row) return undefined;
-    const url = text(row.publicUrl || row.remoteUrl || row.storageUrl || row.cdnUrl);
+    let url = text(row.publicUrl || row.remoteUrl || row.storageUrl || row.cdnUrl);
     if (!url) return undefined;
-    return { id: text(row.id) || undefined, url, alt: text(row.altText || row.fileName || row.originalFileName) || undefined, width: Number(row.width) || undefined, height: Number(row.height) || undefined };
+
+    const publicApiUrl = text(
+      process.env.PUBLIC_API_URL ||
+        process.env.BACKEND_PUBLIC_URL ||
+        process.env.RENDER_EXTERNAL_URL,
+    ).replace(/\/$/, "");
+
+    if (publicApiUrl && /^https?:\/\/localhost(?::\d+)?/i.test(url)) {
+      url = url.replace(/^https?:\/\/localhost(?::\d+)?/i, publicApiUrl);
+    }
+
+    return {
+      id: text(row.id) || undefined,
+      url,
+      alt: text(row.altText || row.fileName || row.originalFileName) || undefined,
+      width: Number(row.width) || undefined,
+      height: Number(row.height) || undefined,
+    };
   }
 
   async findPublishedBySlug(input: string) {
@@ -57,7 +74,7 @@ export class PublicWebsitesService {
     const websiteId = text(setting.id || settingRecord.localId || settingRecord.id);
     if (!accountId || !schoolId || !websiteId) return null;
 
-    const names = ["schools", "branches", "teachers", "programs", "subjects", "announcements", "calendarEvents", "mediaAssets", "websitePages", "websiteSections", "websiteNavigationItems"];
+    const names = ["schools", "branches", "teachers", "students", "classes", "academicStructures", "organizations", "programs", "subjects", "announcements", "calendarEvents", "portalHighlights", "mediaAssets", "websitePages", "websiteSections", "websiteNavigationItems"];
     const entries = await Promise.all(names.map(async (name) => [name, await this.readTable(accountId, name)] as const));
     const all = Object.fromEntries(entries) as Record<string, AnyRow[]>;
 
@@ -74,12 +91,24 @@ export class PublicWebsitesService {
     const principal = teachers.find((person) => /head|principal|director/i.test(`${person.title || ""} ${person.role || ""}`));
     const programs = scoped("programs").filter((row) => row.websiteVisible !== false).map(item);
     const subjects = scoped("subjects").filter((row) => row.websiteVisible !== false).map(item);
+    const organizations = scoped("organizations", true)
+      .filter((row) => row.websiteVisible !== false && row.active !== false)
+      .map(item);
+    const academicStructures = scoped("academicStructures", true)
+      .filter((row) => row.websiteVisible !== false && row.active !== false)
+      .map(item);
+    const classes = scoped("classes", true)
+      .filter((row) => row.websiteVisible !== false && row.active !== false)
+      .map(item);
+    const highlights = scoped("portalHighlights", true)
+      .filter((row) => row.websiteVisible !== false && row.active !== false && !["draft", "archived", "expired"].includes(text(row.status).toLowerCase()))
+      .map(item);
     const announcements = scoped("announcements", true).filter((row) => row.websiteVisible !== false && row.published !== false && row.status !== "draft").map(item);
     const events = scoped("calendarEvents", true).filter((row) => row.websiteVisible !== false && row.public !== false).map(item);
 
     const pages = scoped("websitePages", true).filter((row) => text(row.websiteSettingId) === websiteId && text(row.status).toLowerCase() === "published").sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0));
     const sectionRows = scoped("websiteSections", true).filter((row) => text(row.websiteSettingId) === websiteId && text(row.status).toLowerCase() === "published" && row.active !== false).sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0));
-    const pools: Record<string, AnyRow[]> = { programs, programmes: programs, subjects, announcements, news: announcements, calendar_events: events, events };
+    const pools: Record<string, AnyRow[]> = { programs, programmes: programs, subjects, organizations, organisations: organizations, academic_structures: academicStructures, classes, portal_highlights: highlights, highlights, announcements, news: announcements, calendar_events: events, events };
     const sectionsFor = (pageId: string) => sectionRows.filter((row) => text(row.pageId) === pageId).map((row) => {
       const source = text(row.sourceType).toLowerCase();
       const sourceItems = pools[source] || [];
@@ -104,7 +133,25 @@ export class PublicWebsitesService {
       website: { id: websiteId, slug, status: "published", templateKey: text(setting.templateKey) || "modern_academy", siteName: text(setting.siteName) || undefined, tagline: text(setting.tagline) || undefined, description: text(setting.description) || undefined, seoTitle: text(setting.seoTitle) || undefined, seoDescription: text(setting.seoDescription) || undefined, publishedAt: setting.publishedAt || null },
       school: { id: text(school.id) || undefined, name: text(school.name) || text(setting.siteName) || "School", motto: text(school.motto) || undefined, description: text(school.description || school.about) || undefined, email: text(school.email) || undefined, phone: text(school.phone) || undefined, address: text(school.address || school.formattedAddress) || undefined, location: text(school.location || school.locationLabel) || undefined, logo: mediaById(school.logoMediaId), banner: mediaById(school.bannerImageMediaId) },
       branch: branch ? { id: text(branch.id) || undefined, name: text(branch.name) || "Branch", code: text(branch.code) || undefined, email: text(branch.email) || undefined, phone: text(branch.phone) || undefined, address: text(branch.address || branch.formattedAddress) || undefined, location: text(branch.location || branch.locationLabel) || undefined, city: text(branch.city) || undefined, logo: mediaById(branch.logoMediaId), banner: mediaById(branch.bannerImageMediaId) } : undefined,
-      principal, teachers, programs, subjects, announcements, events, gallery, navigation,
+      principal,
+      teachers,
+      programs,
+      subjects,
+      organizations,
+      academicStructures,
+      classes,
+      highlights,
+      announcements,
+      events,
+      stats: {
+        students: scoped("students", true).filter((row) => row.status !== "withdrawn" && row.status !== "transferred").length,
+        teachers: teachers.length,
+        classes: classes.length,
+        subjects: subjects.length,
+        programs: programs.length,
+      },
+      gallery,
+      navigation,
       pages: pages.map((page) => ({ id: text(page.id), slug: text(page.slug) || "home", title: text(page.title || page.name) || "Page", description: text(page.description) || undefined, pageType: text(page.pageType) || undefined, sections: sectionsFor(text(page.id)) })),
       theme: { primaryColor: text(setting.primaryColor) || "#2f6fed", secondaryColor: text(setting.secondaryColor) || undefined, accentColor: text(setting.accentColor) || undefined, fontFamily: text(setting.fontFamily) || undefined },
       generatedAt: Date.now(),
