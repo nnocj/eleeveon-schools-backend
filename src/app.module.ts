@@ -11,6 +11,7 @@ import { PaymentGatewayModule } from "./payment-gateway/payment-gateway.module";
 import { PayrollModule } from "./payroll/payroll.module";
 import { PermissionsModule } from "./permissions/permissions.module";
 import { PrismaModule } from "./prisma/prisma.module";
+import { PublicWebsitesModule } from "./public-websites/public-websites.module";
 import { RealtimeModule } from "./realtime/realtime.module";
 import { SyncModule } from "./sync/sync.module";
 
@@ -32,6 +33,7 @@ import { SyncModule } from "./sync/sync.module";
     PermissionsModule,
     MediaModule,
     SyncModule,
+    PublicWebsitesModule,
   ],
 })
 export class AppModule {}
