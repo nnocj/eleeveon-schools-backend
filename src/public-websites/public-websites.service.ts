@@ -117,17 +117,124 @@ export class PublicWebsitesService {
     });
 
     const pageById = new Map(pages.map((page) => [text(page.id), page]));
-    const navigation = scoped("websiteNavigationItems", true).filter((row) => text(row.websiteSettingId) === websiteId && row.active !== false && text(row.location || "header") !== "footer").sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0)).map((row) => {
+
+    const navigationHref = (row: AnyRow) => {
       const targetPage = pageById.get(text(row.pageId));
       let href = "/";
-      if (row.targetType === "external_url") href = text(row.url) || "#";
-      else if (row.targetType === "portal_login") href = text(row.url) || "https://schools.eleeveon.com";
-      else if (row.targetType === "section") href = `#${text(row.sectionId)}`;
-      else if (targetPage && !["", "home", "index"].includes(text(targetPage.slug).toLowerCase())) href = `/${text(targetPage.slug)}`;
-      return { id: text(row.id) || undefined, label: text(row.label) || "Link", href, openInNewTab: Boolean(row.openInNewTab) };
+
+      if (row.targetType === "external_url") {
+        href = text(row.url) || "#";
+      } else if (row.targetType === "portal_login") {
+        href = text(row.url) || "https://schools.eleeveon.com";
+      } else if (row.targetType === "section") {
+        const targetSection = sectionRows.find(
+          (section) => text(section.id) === text(row.sectionId),
+        );
+
+        href = `#${text(targetSection?.sectionKey || row.sectionId)}`;
+      } else if (
+        targetPage &&
+        !["", "home", "index"].includes(
+          text(targetPage.slug).toLowerCase(),
+        )
+      ) {
+        href = `/${text(targetPage.slug)}`;
+      }
+
+      return href;
+    };
+
+    const navigationItems = scoped("websiteNavigationItems", true)
+      .filter(
+        (row) =>
+          text(row.websiteSettingId) === websiteId &&
+          row.active !== false,
+      )
+      .sort(
+        (a, b) =>
+          Number(a.displayOrder || 0) -
+          Number(b.displayOrder || 0),
+      );
+
+    const mapNavigation = (rows: AnyRow[]) =>
+      rows.map((row) => ({
+        id: text(row.id) || undefined,
+        label: text(row.label) || "Link",
+        href: navigationHref(row),
+        openInNewTab: Boolean(row.openInNewTab),
+      }));
+
+    const headerNavigation = mapNavigation(
+      navigationItems.filter((row) =>
+        ["", "header", "mobile", "utility"].includes(
+          text(row.location || "header").toLowerCase(),
+        ),
+      ),
+    );
+
+    const footerNavigation = mapNavigation(
+      navigationItems.filter(
+        (row) =>
+          text(row.location || "header").toLowerCase() ===
+          "footer",
+      ),
+    );
+
+    const explicitWebsiteGalleryRows = mediaRows.filter(
+      (row) =>
+        row.metadata?.websiteVisible === true ||
+        row.websiteVisible === true,
+    );
+
+    const galleryOwnerTables = new Set([
+      "websitegallery",
+      "website_gallery",
+      "schoolgallery",
+      "school_gallery",
+      "gallery",
+    ]);
+
+    const galleryFieldKeys = new Set([
+      "gallery",
+      "galleryimage",
+      "galleryimages",
+      "schoolgallery",
+      "schoolgalleryimage",
+      "schoolgalleryimages",
+      "websitegallery",
+      "websitegalleryimage",
+      "websitegalleryimages",
+    ]);
+
+    const structuralGalleryRows = mediaRows.filter((row) => {
+      const ownerTable = text(row.ownerTable)
+        .toLowerCase()
+        .replace(/[\s-]+/g, "_");
+      const fieldKey = text(row.fieldKey)
+        .toLowerCase()
+        .replace(/[\s-]+/g, "");
+
+      return (
+        galleryOwnerTables.has(ownerTable) ||
+        galleryFieldKeys.has(fieldKey)
+      );
     });
 
-    const gallery = mediaRows.filter((row) => row.metadata?.websiteVisible !== false).map((row) => this.publicMedia(row)).filter(Boolean).slice(0, 30);
+    const gallerySourceRows = [
+      ...explicitWebsiteGalleryRows,
+      ...structuralGalleryRows,
+    ].filter(
+      (row, index, rows) =>
+        row.metadata?.websiteVisible !== false &&
+        rows.findIndex(
+          (candidate) => text(candidate.id) === text(row.id),
+        ) === index,
+    );
+
+    const gallery = gallerySourceRows
+      .map((row) => this.publicMedia(row))
+      .filter(Boolean)
+      .slice(0, 30);
 
     return {
       website: { id: websiteId, slug, status: "published", templateKey: text(setting.templateKey) || "modern_academy", siteName: text(setting.siteName) || undefined, tagline: text(setting.tagline) || undefined, description: text(setting.description) || undefined, seoTitle: text(setting.seoTitle) || undefined, seoDescription: text(setting.seoDescription) || undefined, publishedAt: setting.publishedAt || null },
@@ -144,14 +251,29 @@ export class PublicWebsitesService {
       announcements,
       events,
       stats: {
-        students: scoped("students", true).filter((row) => row.status !== "withdrawn" && row.status !== "transferred").length,
+        students: scoped("students", true).filter(
+          (row) =>
+            row.status !== "withdrawn" &&
+            row.status !== "transferred",
+        ).length,
         teachers: teachers.length,
         classes: classes.length,
         subjects: subjects.length,
         programs: programs.length,
+        organizations: organizations.length,
+        academicStructures: academicStructures.length,
+        galleryImages: gallery.length,
+        announcements: announcements.length,
+        events: events.length,
       },
       gallery,
-      navigation,
+
+      // Backward-compatible header navigation used by the current website app.
+      navigation: headerNavigation,
+
+      // Explicit navigation collections for richer header/footer rendering.
+      headerNavigation,
+      footerNavigation,
       pages: pages.map((page) => ({ id: text(page.id), slug: text(page.slug) || "home", title: text(page.title || page.name) || "Page", description: text(page.description) || undefined, pageType: text(page.pageType) || undefined, sections: sectionsFor(text(page.id)) })),
       theme: { primaryColor: text(setting.primaryColor) || "#2f6fed", secondaryColor: text(setting.secondaryColor) || undefined, accentColor: text(setting.accentColor) || undefined, fontFamily: text(setting.fontFamily) || undefined },
       generatedAt: Date.now(),
