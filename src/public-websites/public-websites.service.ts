@@ -8,6 +8,7 @@ import type {
   PublicWebsiteItem,
   PublicWebsiteMedia,
   PublicWebsiteNavigationLink,
+  PublicWebsitePage,
   PublicWebsitePerson,
   PublicWebsiteSection,
 } from "./public-websites.types";
@@ -593,6 +594,7 @@ export class PublicWebsitesService {
 
           return {
             id: text(row.id) || undefined,
+            pageId: text(row.pageId) || undefined,
             sectionKey:
               text(
                 row.sectionKey || row.id,
@@ -642,10 +644,57 @@ export class PublicWebsitesService {
           };
         });
 
-    const sections = pages.flatMap(
-      (page) =>
-        sectionsFor(text(page.id)),
-    );
+    const websitePages: PublicWebsitePage[] =
+      pages.map((page) => {
+        const pageSlug =
+          text(page.slug).toLowerCase() ||
+          "home";
+
+        const pageStatus =
+          text(page.status).toLowerCase();
+
+        return {
+          id: text(page.id),
+          websiteSettingId: websiteId,
+          slug: pageSlug,
+          title:
+            text(page.title) ||
+            (["home", "index"].includes(
+              pageSlug,
+            )
+              ? text(setting.siteName) ||
+                text(school.name) ||
+                "Home"
+              : "Page"),
+          description:
+            text(page.description) ||
+            undefined,
+          pageType:
+            text(page.pageType) ||
+            undefined,
+          status:
+            pageStatus === "draft" ||
+            pageStatus === "unpublished" ||
+            pageStatus === "archived"
+              ? pageStatus
+              : "published",
+          isHomePage:
+            page.isHomePage === true ||
+            ["home", "index"].includes(
+              pageSlug,
+            ),
+          displayOrder:
+            Number(page.displayOrder || 0),
+          sections: sectionsFor(
+            text(page.id),
+          ),
+        };
+      });
+
+    const sections =
+      websitePages.flatMap(
+        (page) => page.sections,
+      );
 
     const pageById = new Map(
       pages.map((page) => [
@@ -913,6 +962,7 @@ export class PublicWebsitesService {
       headerNavigation,
       footerNavigation,
 
+      pages: websitePages,
       sections,
       generatedAt: Date.now(),
     };

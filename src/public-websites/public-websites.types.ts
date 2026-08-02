@@ -94,6 +94,7 @@ export type PublicWebsiteNavigationLink = {
 
 export type PublicWebsiteSection = {
   id?: string;
+  pageId?: string;
   sectionKey: string;
   sectionType: string;
   variant?: string;
@@ -108,6 +109,19 @@ export type PublicWebsiteSection = {
   primaryMedia?: PublicWebsiteMedia;
   backgroundMedia?: PublicWebsiteMedia;
   media?: PublicWebsiteMedia[];
+};
+
+export type PublicWebsitePage = {
+  id: string;
+  websiteSettingId: string;
+  slug: string;
+  title: string;
+  description?: string;
+  pageType?: string;
+  status: PublicWebsiteStatus;
+  isHomePage: boolean;
+  displayOrder: number;
+  sections: PublicWebsiteSection[];
 };
 
 export type PublicWebsiteStatistics = {
@@ -155,6 +169,13 @@ export type PublicWebsiteDataset = {
   headerNavigation: PublicWebsiteNavigationLink[];
   footerNavigation: PublicWebsiteNavigationLink[];
 
+  pages: PublicWebsitePage[];
+
+  /**
+   * Flat compatibility view for older public website clients.
+   * New clients should resolve a page and render page.sections.
+   */
   sections: PublicWebsiteSection[];
+
   generatedAt: number;
 };
