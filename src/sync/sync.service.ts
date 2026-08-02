@@ -179,6 +179,8 @@ const LOCAL_FIRST_TABLES = new Set([
   // Public school website and template content.
   // These must stay aligned with the frontend LOCAL_FIRST_SYNC_TABLES registry.
   "websiteSettings",
+  "websiteTemplateSettings",
+  "websiteTemplateAssignments",
   "websitePages",
   "websiteSections",
   "websiteNavigationItems",
@@ -250,6 +252,8 @@ const SCHOOL_REQUIRED_TABLES = new Set([
   // Public website records are school-owned. branchId is optional because a
   // school may publish one website spanning all branches.
   "websiteSettings",
+  "websiteTemplateSettings",
+  "websiteTemplateAssignments",
   "websitePages",
   "websiteSections",
   "websiteNavigationItems",
@@ -405,6 +409,8 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
     "branches",
     "schoolBranchSettings",
     "websiteSettings",
+    "websiteTemplateSettings",
+    "websiteTemplateAssignments",
     "websitePages",
     "websiteSections",
     "websiteNavigationItems",
@@ -420,6 +426,8 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
     "branches",
     "schoolBranchSettings",
     "websiteSettings",
+    "websiteTemplateSettings",
+    "websiteTemplateAssignments",
     "websitePages",
     "websiteSections",
     "websiteNavigationItems",
