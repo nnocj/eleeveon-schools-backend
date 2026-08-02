@@ -134,7 +134,13 @@ export class PublicWebsitesService {
 
   async findPublishedBySlug(
     input: string,
-  ): Promise<PublicWebsiteDataset | null> {
+  ): Promise<
+    | {
+        dataset: PublicWebsiteDataset;
+        templateSettings: Record<string, unknown>;
+      }
+    | null
+  > {
     const slug = text(input).toLowerCase();
 
     if (!slugPattern.test(slug)) {
@@ -214,6 +220,8 @@ export class PublicWebsitesService {
       "calendarEvents",
       "portalHighlights",
       "mediaAssets",
+      "websiteTemplateSettings",
+      "websiteTemplateAssignments",
       "websitePages",
       "websiteSections",
       "websiteNavigationItems",
@@ -265,6 +273,93 @@ export class PublicWebsitesService {
           return true;
         },
       );
+
+    const templateAssignments = scoped(
+      "websiteTemplateAssignments",
+      true,
+    )
+      .filter(
+        (row) =>
+          text(row.websiteSettingId) ===
+            websiteId &&
+          row.active !== false &&
+          row.isDefault !== false &&
+          text(
+            row.scopeType || "website",
+          ).toLowerCase() === "website",
+      )
+      .sort(
+        (a, b) =>
+          Number(b.updatedAt || 0) -
+          Number(a.updatedAt || 0),
+      );
+
+    const templateAssignment =
+      templateAssignments[0];
+
+    const templateSettingRows = scoped(
+      "websiteTemplateSettings",
+      true,
+    )
+      .filter(
+        (row) =>
+          text(row.websiteSettingId) ===
+            websiteId &&
+          row.active !== false,
+      )
+      .sort(
+        (a, b) =>
+          Number(b.updatedAt || 0) -
+          Number(a.updatedAt || 0),
+      );
+
+    const assignedTemplateSettingId =
+      text(
+        templateAssignment
+          ?.templateSettingId,
+      );
+
+    const templateSetting =
+      templateSettingRows.find(
+        (row) =>
+          !assignedTemplateSettingId ||
+          text(row.id) ===
+            assignedTemplateSettingId ||
+          text(row.localId) ===
+            assignedTemplateSettingId ||
+          text(row.cloudId) ===
+            assignedTemplateSettingId,
+      ) || templateSettingRows[0];
+
+    const publicTemplateSettings =
+      templateSetting?.settings &&
+      typeof templateSetting.settings ===
+        "object"
+        ? {
+            ...templateSetting.settings,
+            templateKey:
+              text(
+                templateSetting.templateKey ||
+                  templateSetting.settings
+                    ?.templateKey ||
+                  setting.templateKey,
+              ) || "modern_academy",
+            templateVersion:
+              text(
+                templateSetting.templateVersion ||
+                  templateSetting.settings
+                    ?.templateVersion ||
+                  setting.templateVersion,
+              ) || "2.0.0",
+          }
+        : {
+            templateKey:
+              text(setting.templateKey) ||
+              "modern_academy",
+            templateVersion:
+              text(setting.templateVersion) ||
+              "2.0.0",
+          };
 
     const mediaRows =
       scoped("mediaAssets", true);
@@ -841,7 +936,7 @@ export class PublicWebsitesService {
         ),
     );
 
-    return {
+    const dataset: PublicWebsiteDataset = {
       accountId,
       schoolId,
       branchId:
@@ -965,6 +1060,12 @@ export class PublicWebsitesService {
       pages: websitePages,
       sections,
       generatedAt: Date.now(),
+    };
+
+    return {
+      dataset,
+      templateSettings:
+        publicTemplateSettings,
     };
   }
 }
