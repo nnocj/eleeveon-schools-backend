@@ -157,6 +157,7 @@ const LOCAL_FIRST_TABLES = new Set([
   "staffPaymentRecords",
   "announcements",
   "announcementRecipients",
+  "portalHighlights",
   "messageThreads",
   "messages",
   "communicationLogs",
@@ -536,7 +537,7 @@ const WORKSPACE_BOOTSTRAP_TABLES: Record<
  * Administrative workspaces must not open with a silently truncated branch.
  * HTTP body limits and infrastructure limits should be configured separately.
  */
-const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 1;
+const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 2;
 
 
 @Injectable()
