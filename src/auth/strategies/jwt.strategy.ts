@@ -20,6 +20,13 @@ import {
   createHash,
 } from "crypto";
 
+import type {
+  AppRole,
+} from "../../common/roles";
+import {
+  normalizeRole,
+} from "../../common/roles";
+
 import {
   PrismaService,
 } from "../../prisma/prisma.service";
@@ -34,10 +41,27 @@ export type JwtPayload = {
   id?: string;
   accountId?: string;
   email?: string;
+
+  /**
+   * Backward-compatible account fallback role.
+   */
   role?: string;
+
+  /**
+   * Explicit selected workspace context.
+   */
+  activeMembershipId?: string | null;
+  activeRole?: string | null;
+  schoolId?: string | null;
+  branchId?: string | null;
+  teacherId?: string | null;
+  studentId?: string | null;
+  parentId?: string | null;
+
   membershipRevision?: string;
   permissionsRevision?: string;
   sessionRevision?: string;
+
   iat?: number;
   exp?: number;
 };
@@ -68,8 +92,10 @@ export class JwtStrategy
       jwtFromRequest:
         ExtractJwt
           .fromAuthHeaderAsBearerToken(),
-      ignoreExpiration: false,
-      secretOrKey: secret,
+      ignoreExpiration:
+        false,
+      secretOrKey:
+        secret,
     });
   }
 
@@ -98,30 +124,44 @@ export class JwtStrategy
       );
     }
 
-    /**
-     * One user query returns the lightweight account and active memberships.
-     */
     const [
       user,
       permissionRows,
     ] = await Promise.all([
       this.prisma.appUser.findFirst({
         where: {
-          id: userId,
+          id:
+            userId,
           accountId:
             tokenAccountId,
-          active: true,
+          active:
+            true,
         },
         include: {
-          account: true,
+          account:
+            true,
           memberships: {
             where: {
-              active: true,
+              active:
+                true,
+              status: {
+                notIn: [
+                  "suspended",
+                  "revoked",
+                  "expired",
+                ],
+              },
             },
-            orderBy: {
-              createdAt:
-                "asc",
-            },
+            orderBy: [
+              {
+                isDefault:
+                  "desc",
+              },
+              {
+                createdAt:
+                  "asc",
+              },
+            ],
           },
         },
       }),
@@ -132,20 +172,32 @@ export class JwtStrategy
             tokenAccountId,
         },
         orderBy: {
-          moduleKey: "asc",
+          moduleKey:
+            "asc",
         },
         select: {
-          id: true,
-          moduleKey: true,
-          moduleLabel: true,
-          owner: true,
-          admin: true,
-          branch: true,
-          teacher: true,
-          student: true,
-          parent: true,
-          accountant: true,
-          locked: true,
+          id:
+            true,
+          moduleKey:
+            true,
+          moduleLabel:
+            true,
+          owner:
+            true,
+          admin:
+            true,
+          branch:
+            true,
+          teacher:
+            true,
+          student:
+            true,
+          parent:
+            true,
+          accountant:
+            true,
+          locked:
+            true,
         },
       }),
     ]);
@@ -164,37 +216,148 @@ export class JwtStrategy
     const memberships:
       LightweightMembership[] =
       user.memberships.map(
-        (membership) => ({
-          id:
-            membership.id,
-          accountId:
-            membership.accountId,
-          role:
-            membership.role,
-          schoolId:
-            membership.schoolId ??
-            null,
-          branchId:
-            membership.branchId ??
-            null,
-          teacherId:
-            membership.teacherId ??
-            null,
-          studentId:
-            membership.studentId ??
-            null,
-          parentId:
-            membership.parentId ??
-            null,
-          active:
-            membership.active !==
-            false,
-        }),
+        (membership) => {
+          const normalizedRole =
+            normalizeRole(
+              membership.role,
+            );
+
+          if (!normalizedRole) {
+            throw new UnauthorizedException(
+              `Membership ${membership.id} has an invalid role.`,
+            );
+          }
+
+          return {
+            id:
+              membership.id,
+            accountId:
+              membership.accountId,
+            role:
+              normalizedRole,
+            schoolId:
+              membership.schoolId ??
+              null,
+            branchId:
+              membership.branchId ??
+              null,
+            teacherId:
+              membership.teacherId ??
+              null,
+            studentId:
+              membership.studentId ??
+              null,
+            parentId:
+              membership.parentId ??
+              null,
+            active:
+              membership.active !==
+              false,
+            status:
+              membership.status ??
+              null,
+            isDefault:
+              membership.isDefault ===
+              true,
+          };
+        },
       );
 
     if (!memberships.length) {
       throw new UnauthorizedException(
         "No active membership is available for this session.",
+      );
+    }
+
+    const fallbackRole =
+      this.requireRole(
+        user.role,
+        "The account user has an invalid role.",
+      );
+
+    const requestedMembershipId =
+      String(
+        payload.activeMembershipId ||
+          "",
+      ).trim();
+
+    const requestedRole =
+      normalizeRole(
+        payload.activeRole,
+      );
+
+    /*
+     * Resolve the selected membership in priority order:
+     * 1. explicit activeMembershipId from the JWT;
+     * 2. role + scope carried by the JWT;
+     * 3. default membership;
+     * 4. membership matching the AppUser fallback role;
+     * 5. first active membership.
+     */
+    const activeMembership =
+      (requestedMembershipId
+        ? memberships.find(
+            (membership) =>
+              membership.id ===
+              requestedMembershipId,
+          )
+        : undefined) ||
+      memberships.find(
+        (membership) =>
+          Boolean(
+            requestedRole &&
+              membership.role ===
+                requestedRole &&
+              this.sameOptionalId(
+                membership.schoolId,
+                payload.schoolId,
+              ) &&
+              this.sameOptionalId(
+                membership.branchId,
+                payload.branchId,
+              ) &&
+              this.sameOptionalId(
+                membership.teacherId,
+                payload.teacherId,
+              ) &&
+              this.sameOptionalId(
+                membership.studentId,
+                payload.studentId,
+              ) &&
+              this.sameOptionalId(
+                membership.parentId,
+                payload.parentId,
+              ),
+          ),
+      ) ||
+      memberships.find(
+        (membership) =>
+          membership.isDefault,
+      ) ||
+      memberships.find(
+        (membership) =>
+          membership.role ===
+          fallbackRole,
+      ) ||
+      memberships[0];
+
+    if (!activeMembership) {
+      throw new UnauthorizedException(
+        "The selected membership is no longer active.",
+      );
+    }
+
+    /*
+     * If the token explicitly names a membership that no longer exists or is
+     * inactive, reject the session rather than silently switching roles.
+     */
+    if (
+      requestedMembershipId &&
+      activeMembership.id !==
+        requestedMembershipId
+    ) {
+      throw new UnauthorizedException(
+        "The selected membership is no longer active.",
       );
     }
 
@@ -224,26 +387,51 @@ export class JwtStrategy
                 user.lastLoginAt,
               ).getTime()
             : 0,
+        activeMembershipId:
+          activeMembership.id,
         membershipRevision,
         permissionsRevision,
       });
 
     return {
-      id: user.id,
+      id:
+        user.id,
       accountId:
         user.accountId,
       email:
         user.email,
       phone:
         user.phone,
+
+      /*
+       * The effective request role now comes from the selected membership.
+       * This is the critical multi-role fix.
+       */
       role:
-        user.role,
+        activeMembership.role,
+
       fullName:
         user.fullName,
       active:
         user.active,
       lastLoginAt:
         user.lastLoginAt,
+
+      activeMembershipId:
+        activeMembership.id,
+      activeRole:
+        activeMembership.role,
+      schoolId:
+        activeMembership.schoolId,
+      branchId:
+        activeMembership.branchId,
+      teacherId:
+        activeMembership.teacherId,
+      studentId:
+        activeMembership.studentId,
+      parentId:
+        activeMembership.parentId,
+
       account: {
         id:
           user.account.id,
@@ -260,6 +448,7 @@ export class JwtStrategy
         status:
           user.account.status,
       },
+
       memberships,
       membershipRevision,
       permissionsRevision,
@@ -267,16 +456,70 @@ export class JwtStrategy
     };
   }
 
+  private requireRole(
+    role: string | null | undefined,
+    message: string,
+  ): AppRole {
+    const normalized =
+      normalizeRole(
+        role,
+      );
+
+    if (!normalized) {
+      throw new UnauthorizedException(
+        message,
+      );
+    }
+
+    return normalized;
+  }
+
+  private sameOptionalId(
+    actual:
+      | string
+      | null
+      | undefined,
+    expected:
+      | string
+      | null
+      | undefined,
+  ): boolean {
+    const expectedValue =
+      String(
+        expected ??
+          "",
+      ).trim();
+
+    if (!expectedValue) {
+      return true;
+    }
+
+    return (
+      String(
+        actual ??
+          "",
+      ).trim() ===
+      expectedValue
+    );
+  }
+
   private revisionFor(
     value: unknown,
-  ) {
+  ): string {
     return createHash(
       "sha256",
     )
       .update(
-        JSON.stringify(value),
+        JSON.stringify(
+          value,
+        ),
       )
-      .digest("hex")
-      .slice(0, 24);
+      .digest(
+        "hex",
+      )
+      .slice(
+        0,
+        24,
+      );
   }
 }

@@ -26,6 +26,13 @@ const MEMBERSHIP_MANAGERS = new Set<string>([
   "branch_admin",
 ]);
 
+const BRANCH_ASSIGNABLE_ROLES = new Set<string>([
+  "accountant",
+  "teacher",
+  "student",
+  "parent",
+]);
+
 type NullableId = string | number | null | undefined;
 
 type ManagerScope = {
@@ -288,23 +295,49 @@ export class MembershipsService {
       const membershipRole =
         this.normalizeMembershipRole(membership.role);
 
+      /*
+       * Only management memberships grant management scope.
+       *
+       * A user may also have teacher, student, parent or accountant
+       * memberships in other schools or branches. Those memberships must
+       * never expand the locations where the user can administer access.
+       */
+      if (!MEMBERSHIP_MANAGERS.has(membershipRole)) {
+        continue;
+      }
+
       if (
         membershipRole === "super_admin" &&
         !membership.schoolId &&
         !membership.branchId
       ) {
         accountWide = true;
+        continue;
       }
 
-      if (membership.schoolId) {
+      if (
+        membershipRole === "school_admin" &&
+        membership.schoolId
+      ) {
         schoolIds.add(membership.schoolId);
+        continue;
       }
 
-      if (membership.branchId) {
+      if (
+        membershipRole === "branch_admin" &&
+        membership.schoolId &&
+        membership.branchId
+      ) {
+        schoolIds.add(membership.schoolId);
         branchIds.add(membership.branchId);
       }
     }
 
+    /*
+     * School administrators manage every branch under their school. Branch
+     * records live in SyncRecord payloads, so membership listing is scoped by
+     * schoolId as well as any explicitly known branch IDs.
+     */
     return {
       accountWide,
       schoolIds,
@@ -351,12 +384,103 @@ export class MembershipsService {
       );
     }
 
+    /*
+     * A manager who only has branch scope cannot create or modify a
+     * school-wide membership by supplying schoolId without branchId.
+     */
+    if (
+      normalizedSchoolId &&
+      !normalizedBranchId &&
+      scope.schoolIds.has(normalizedSchoolId)
+    ) {
+      const hasSchoolWideAuthority =
+        await this.prisma.userMembership.findFirst({
+          where: {
+            accountId,
+            userId: actor.id,
+            role: {
+              in: ["school_admin", "admin"],
+            },
+            schoolId: normalizedSchoolId,
+            branchId: null,
+            active: true,
+            status: "active",
+          },
+          select: {
+            id: true,
+          },
+        });
+
+      if (!hasSchoolWideAuthority) {
+        throw new ForbiddenException(
+          "Only a school administrator may manage school-wide memberships.",
+        );
+      }
+    }
+
     if (
       !normalizedSchoolId &&
       !normalizedBranchId
     ) {
       throw new ForbiddenException(
         "Only an account-wide manager may manage an account-wide membership.",
+      );
+    }
+  }
+
+  private async assertRoleManagementAllowed(
+    actor: AuthUser,
+    accountId: string,
+    targetRole: string,
+  ): Promise<void> {
+    const normalizedActorRole =
+      this.normalizeMembershipRole(actor.role);
+
+    if (
+      normalizedActorRole === "developer" ||
+      normalizedActorRole === "super_admin" ||
+      normalizedActorRole === "school_admin"
+    ) {
+      return;
+    }
+
+    if (normalizedActorRole !== "branch_admin") {
+      throw new ForbiddenException(
+        "You cannot manage this membership role.",
+      );
+    }
+
+    if (!BRANCH_ASSIGNABLE_ROLES.has(targetRole)) {
+      throw new ForbiddenException(
+        "Branch administrators can only manage accountant, teacher, student, and parent memberships.",
+      );
+    }
+
+    /*
+     * Confirm that the actor still has an active branch-admin membership
+     * in this account. This prevents a stale JWT role from being enough
+     * after the actor's branch-admin membership has been suspended or removed.
+     */
+    const activeBranchManager =
+      await this.prisma.userMembership.findFirst({
+        where: {
+          accountId,
+          userId: actor.id,
+          role: "branch_admin",
+          active: true,
+          status: "active",
+          branchId: {
+            not: null,
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+    if (!activeBranchManager) {
+      throw new ForbiddenException(
+        "No active branch administrator membership grants this operation.",
       );
     }
   }
@@ -431,7 +555,6 @@ export class MembershipsService {
         schoolId: {
           in: [...scope.schoolIds],
         },
-        branchId: null,
       });
     }
 
@@ -486,6 +609,12 @@ export class MembershipsService {
 
     const role =
       this.normalizeMembershipRole(dto.role);
+
+    await this.assertRoleManagementAllowed(
+      actor,
+      targetAccountId,
+      role,
+    );
 
     if (
       role === "developer" &&
@@ -666,6 +795,12 @@ export class MembershipsService {
         : this.normalizeMembershipRole(
             existing.role,
           );
+
+    await this.assertRoleManagementAllowed(
+      actor,
+      existing.accountId,
+      role,
+    );
 
     if (
       (existing.role === "developer" ||
@@ -912,6 +1047,12 @@ export class MembershipsService {
     assertSameAccountOrDeveloper(
       actor,
       existing.accountId,
+    );
+
+    await this.assertRoleManagementAllowed(
+      actor,
+      existing.accountId,
+      this.normalizeMembershipRole(existing.role),
     );
 
     await this.assertAssignmentAllowed(

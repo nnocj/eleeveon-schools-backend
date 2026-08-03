@@ -7,8 +7,38 @@ import { assertSameAccountOrDeveloper } from "../common/scope";
 import { isDeveloper, normalizeRole } from "../common/roles";
 import { CreateAccountDto, CreateAccountUserDto, UpdateAccountDto, UpdateAccountUserDto, UpdateAccountUserStatusDto } from "./dto/account-users.dto";
 
-const USER_MANAGEMENT_ROLES = new Set(["developer", "platform_team", "owner", "super_admin", "admin", "branch_admin"]);
-const OWNER_ONLY_ROLES = new Set(["developer", "platform_team", "owner", "super_admin"]);
+const USER_CREATION_ROLES = new Set([
+  "developer",
+  "platform_team",
+  "owner",
+  "super_admin",
+  "school_admin",
+  "admin",
+  "branch_admin",
+]);
+
+const ACCOUNT_USER_MANAGEMENT_ROLES = new Set([
+  "developer",
+  "platform_team",
+  "owner",
+  "super_admin",
+  "school_admin",
+  "admin",
+]);
+
+const OWNER_ONLY_ROLES = new Set([
+  "developer",
+  "platform_team",
+  "owner",
+  "super_admin",
+]);
+
+const BRANCH_ASSIGNABLE_ROLES = new Set([
+  "accountant",
+  "teacher",
+  "student",
+  "parent",
+]);
 
 /**
  * Produces a stable identity for a membership scope.
@@ -47,9 +77,35 @@ export class AccountsService {
     private readonly realtime: RealtimeEventsService,
   ) {}
 
-  private assertCanManageUsers(role: string) {
-    if (!USER_MANAGEMENT_ROLES.has(role)) {
-      throw new ForbiddenException("You do not have permission to manage account users.");
+  private normalizedActorRole(role: string): string {
+    const normalized = normalizeRole(role);
+
+    if (!normalized) {
+      throw new ForbiddenException(
+        "Invalid or unsupported user role.",
+      );
+    }
+
+    return normalized === "admin"
+      ? "school_admin"
+      : normalized;
+  }
+
+  private assertCanCreateUsers(role: string) {
+    const normalizedRole = this.normalizedActorRole(role);
+    if (!USER_CREATION_ROLES.has(normalizedRole)) {
+      throw new ForbiddenException(
+        "You do not have permission to create account users.",
+      );
+    }
+  }
+
+  private assertCanManageAccountUsers(role: string) {
+    const normalizedRole = this.normalizedActorRole(role);
+    if (!ACCOUNT_USER_MANAGEMENT_ROLES.has(normalizedRole)) {
+      throw new ForbiddenException(
+        "You do not have permission to manage account users.",
+      );
     }
   }
 
@@ -130,30 +186,163 @@ export class AccountsService {
     return account;
   }
 
-  async getUsers(actor: AuthUser, accountId?: string) {
+  async getUsers(
+    actor: AuthUser,
+    accountId?: string,
+    filters?: {
+      schoolId?: string;
+      branchId?: string;
+    },
+  ) {
     const id = accountId || actor.accountId;
     assertSameAccountOrDeveloper(actor, id);
+
+    const schoolId = filters?.schoolId?.trim() || undefined;
+    const branchId = filters?.branchId?.trim() || undefined;
+    const actorRole = this.normalizedActorRole(actor.role);
+
+    /*
+     * Branch administrators must always be constrained to one of their active
+     * branch-admin memberships. Query parameters are treated as requested
+     * scope, never as authority.
+     */
+    if (actorRole === "branch_admin") {
+      if (!schoolId || !branchId) {
+        throw new BadRequestException(
+          "schoolId and branchId are required for branch-scoped user listing.",
+        );
+      }
+
+      const branchAccess = await this.prisma.userMembership.findFirst({
+        where: {
+          accountId: id,
+          userId: actor.id,
+          role: "branch_admin",
+          schoolId,
+          branchId,
+          active: true,
+          status: "active",
+        },
+        select: { id: true },
+      });
+
+      if (!branchAccess) {
+        throw new ForbiddenException(
+          "You cannot view users for this branch.",
+        );
+      }
+    }
+
+    const membershipWhere = {
+      accountId: id,
+      ...(schoolId ? { schoolId } : {}),
+      ...(branchId ? { branchId } : {}),
+    };
+
     return this.prisma.appUser.findMany({
-      where: { accountId: id },
+      where: {
+        accountId: id,
+        ...(schoolId || branchId
+          ? {
+              memberships: {
+                some: membershipWhere,
+              },
+            }
+          : {}),
+      },
       select: {
-        id: true, accountId: true, fullName: true, email: true, phone: true, role: true, active: true, lastLoginAt: true, createdAt: true, updatedAt: true,
-        memberships: { where: { accountId: id }, orderBy: { createdAt: "asc" } },
+        id: true,
+        accountId: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        role: true,
+        active: true,
+        lastLoginAt: true,
+        createdAt: true,
+        updatedAt: true,
+        memberships: {
+          where: membershipWhere,
+          orderBy: { createdAt: "asc" },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
   }
 
   async createUser(actor: AuthUser, dto: CreateAccountUserDto, accountId?: string) {
-    this.assertCanManageUsers(actor.role);
+    this.assertCanCreateUsers(actor.role);
     const targetAccountId = accountId || actor.accountId;
     assertSameAccountOrDeveloper(actor, targetAccountId);
 
     const role = normalizeRole(dto.role);
     if (!role) throw new BadRequestException("Invalid role.");
+
+    const actorRole = this.normalizedActorRole(actor.role);
+
+    if (actorRole === "branch_admin") {
+      if (!BRANCH_ASSIGNABLE_ROLES.has(role)) {
+        throw new ForbiddenException(
+          "Branch administrators can only create accountant, teacher, student, and parent users.",
+        );
+      }
+
+      if (!dto.schoolId || !dto.branchId) {
+        throw new BadRequestException(
+          "School and branch are required for branch-created users.",
+        );
+      }
+
+      const branchAccess = await this.prisma.userMembership.findFirst({
+        where: {
+          accountId: targetAccountId,
+          userId: actor.id,
+          role: "branch_admin",
+          schoolId: dto.schoolId,
+          branchId: dto.branchId,
+          active: true,
+          status: "active",
+        },
+        select: { id: true },
+      });
+
+      if (!branchAccess) {
+        throw new ForbiddenException(
+          "You cannot create users for this branch.",
+        );
+      }
+    }
     if ((role === "developer" || role === "platform_team") && !isDeveloper(actor.role)) throw new ForbiddenException("Only developer can create developer users.");
     if (role === "super_admin" || role === "owner") this.assertCanManageOwnerOnly(actor.role);
-    if (!["developer", "platform_team", "owner", "super_admin"].includes(role) && (!dto.schoolId || !dto.branchId)) {
-      throw new BadRequestException("School and branch are required for this role.");
+    const canonicalRole = role === "admin" ? "school_admin" : role;
+
+    if (
+      !["developer", "platform_team", "owner", "super_admin"].includes(
+        canonicalRole,
+      ) &&
+      (!dto.schoolId || !dto.branchId)
+    ) {
+      throw new BadRequestException(
+        "School and branch are required for this role.",
+      );
+    }
+
+    if (canonicalRole === "teacher" && !dto.teacherId) {
+      throw new BadRequestException(
+        "teacherId is required for a teacher user.",
+      );
+    }
+
+    if (canonicalRole === "student" && !dto.studentId) {
+      throw new BadRequestException(
+        "studentId is required for a student user.",
+      );
+    }
+
+    if (canonicalRole === "parent" && !dto.parentId) {
+      throw new BadRequestException(
+        "parentId is required for a parent user.",
+      );
     }
 
     const email = dto.email.toLowerCase().trim();
@@ -163,13 +352,13 @@ export class AccountsService {
 
     const created = await this.prisma.$transaction(async (tx) => {
       const user = await tx.appUser.create({
-        data: { accountId: targetAccountId, fullName: dto.fullName.trim(), email, phone: dto.phone?.trim() || null, passwordHash, role, active: true },
+        data: { accountId: targetAccountId, fullName: dto.fullName.trim(), email, phone: dto.phone?.trim() || null, passwordHash, role: canonicalRole, active: true },
       });
       await tx.userMembership.create({
         data: {
           accountId: targetAccountId,
           userId: user.id,
-          role,
+          role: canonicalRole,
           schoolId: dto.schoolId ?? null,
           branchId: dto.branchId ?? null,
           teacherId: dto.teacherId ?? null,
@@ -177,7 +366,7 @@ export class AccountsService {
           parentId: dto.parentId ?? null,
           scopeKey: buildMembershipScopeKey({
             accountId: targetAccountId,
-            role,
+            role: canonicalRole,
             schoolId: dto.schoolId,
             branchId: dto.branchId,
             teacherId: dto.teacherId,
@@ -206,7 +395,7 @@ export class AccountsService {
   }
 
   async updateUser(actor: AuthUser, userId: string, dto: UpdateAccountUserDto) {
-    this.assertCanManageUsers(actor.role);
+    this.assertCanManageAccountUsers(actor.role);
     const existing = await this.prisma.appUser.findUnique({ where: { id: userId } });
     if (!existing) throw new NotFoundException("User not found.");
     assertSameAccountOrDeveloper(actor, existing.accountId);
@@ -214,7 +403,14 @@ export class AccountsService {
     if ([dto.role, existing.role].includes("super_admin") || [dto.role, existing.role].includes("owner")) this.assertCanManageOwnerOnly(actor.role);
     const user = await this.prisma.appUser.update({
       where: { id: userId },
-      data: { fullName: dto.fullName?.trim(), phone: dto.phone?.trim(), role: dto.role },
+      data: {
+        fullName: dto.fullName?.trim(),
+        phone: dto.phone?.trim(),
+        role:
+          dto.role !== undefined
+            ? this.normalizedActorRole(dto.role)
+            : undefined,
+      },
       select: { id: true, accountId: true, fullName: true, email: true, phone: true, role: true, active: true, lastLoginAt: true, createdAt: true, updatedAt: true, memberships: true },
     });
 
@@ -232,7 +428,7 @@ export class AccountsService {
   }
 
   async updateUserStatus(actor: AuthUser, userId: string, dto: UpdateAccountUserStatusDto) {
-    this.assertCanManageUsers(actor.role);
+    this.assertCanManageAccountUsers(actor.role);
     const existing = await this.prisma.appUser.findUnique({ where: { id: userId } });
     if (!existing) throw new NotFoundException("User not found.");
     assertSameAccountOrDeveloper(actor, existing.accountId);

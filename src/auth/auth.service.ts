@@ -8,17 +8,22 @@ import { JwtService } from "@nestjs/jwt";
 import { createHash } from "crypto";
 import * as bcrypt from "bcryptjs";
 
+import type {
+  AppRole,
+} from "../common/roles";
+import {
+  normalizeRole,
+} from "../common/roles";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   LoginDto,
   RegisterDto,
 } from "./dto/auth.dto";
 
-
 export type LightweightMembership = {
   id: string;
   accountId: string;
-  role: string;
+  role: AppRole;
 
   schoolId: string | null;
   branchId: string | null;
@@ -28,6 +33,8 @@ export type LightweightMembership = {
   parentId: string | null;
 
   active: boolean;
+  status: string | null;
+  isDefault: boolean;
 };
 
 export type AuthenticatedSessionActor = {
@@ -35,10 +42,25 @@ export type AuthenticatedSessionActor = {
   accountId: string;
   email: string;
   phone?: string | null;
-  role: string;
+
+  /**
+   * Backward-compatible account fallback role.
+   * Multi-role authorization should also inspect `memberships`.
+   */
+  role: AppRole;
+
   fullName: string;
   active?: boolean;
   lastLoginAt?: Date | string | null;
+
+  activeMembershipId?: string | null;
+  activeRole?: AppRole | null;
+  schoolId?: string | null;
+  branchId?: string | null;
+  teacherId?: string | null;
+  studentId?: string | null;
+  parentId?: string | null;
+
   account: {
     id: string;
     name: string;
@@ -48,6 +70,7 @@ export type AuthenticatedSessionActor = {
     currency?: string | null;
     status: string;
   };
+
   memberships: LightweightMembership[];
   membershipRevision: string;
   permissionsRevision: string;
@@ -62,7 +85,7 @@ export class AuthService {
     private readonly config: ConfigService,
   ) {}
 
-  private jwtSecret() {
+  private jwtSecret(): string {
     const secret =
       this.config.get<string>("JWT_SECRET");
 
@@ -73,6 +96,22 @@ export class AuthService {
     }
 
     return secret;
+  }
+
+  private requireRole(
+    role: string | null | undefined,
+    message = "Invalid or unsupported user role.",
+  ): AppRole {
+    const normalized =
+      normalizeRole(role);
+
+    if (!normalized) {
+      throw new UnauthorizedException(
+        message,
+      );
+    }
+
+    return normalized;
   }
 
   async register(dto: RegisterDto) {
@@ -184,22 +223,14 @@ export class AuthService {
                 userId: user.id,
                 role:
                   "super_admin",
-
-                // Stable account-level membership identity required by Prisma.
-                // This remains deterministic if the registration request is retried.
                 scopeKey:
                   `super_admin:account:${account.id}`,
-
                 active: true,
                 isDefault: true,
                 status: "active",
               },
             });
 
-          /**
-           * Verify that the newly-created account is visible inside the same
-           * interactive transaction before inserting account-owned defaults.
-           */
           const accountInsideTransaction =
             await tx.account.findUnique({
               where: {
@@ -253,15 +284,6 @@ export class AuthService {
     const email =
       dto.email.toLowerCase().trim();
 
-    /**
-     * One user query returns:
-     * - password hash;
-     * - lightweight account;
-     * - all active memberships.
-     *
-     * The same loaded result is used to build the response. Login does not
-     * call sessionForUser() and therefore does not query the user twice.
-     */
     const user =
       await this.prisma.appUser.findUnique({
         where: { email },
@@ -270,10 +292,18 @@ export class AuthService {
           memberships: {
             where: {
               active: true,
+              status: "active",
             },
-            orderBy: {
-              createdAt: "asc",
-            },
+            orderBy: [
+              {
+                isDefault:
+                  "desc",
+              },
+              {
+                createdAt:
+                  "asc",
+              },
+            ],
           },
         },
       });
@@ -318,9 +348,6 @@ export class AuthService {
         user.accountId,
       ),
 
-      /**
-       * This write is deliberately not followed by another user read.
-       */
       this.prisma.appUser.update({
         where: {
           id: user.id,
@@ -344,10 +371,6 @@ export class AuthService {
     );
   }
 
-  /**
-   * JwtStrategy has already loaded and validated the session user, account,
-   * memberships, and revisions. /auth/me simply serializes that actor.
-   */
   async me(
     actor: AuthenticatedSessionActor,
   ) {
@@ -397,6 +420,29 @@ export class AuthService {
       );
     }
 
+    const fallbackRole =
+      this.requireRole(
+        loaded.role,
+        "The account user has an invalid role.",
+      );
+
+    /*
+     * A default membership provides initial workspace context only.
+     * The frontend may still let the user choose another membership and
+     * persist that choice through the dedicated workspace/session flow.
+     */
+    const defaultMembership =
+      memberships.find(
+        (membership) =>
+          membership.isDefault,
+      ) ||
+      memberships.find(
+        (membership) =>
+          membership.role ===
+          fallbackRole,
+      ) ||
+      memberships[0];
+
     const membershipRevision =
       this.revisionFor(
         memberships,
@@ -409,7 +455,8 @@ export class AuthService {
 
     const sessionRevision =
       this.revisionFor({
-        userId: loaded.id,
+        userId:
+          loaded.id,
         accountId:
           loaded.accountId,
         active:
@@ -422,13 +469,17 @@ export class AuthService {
                 loaded.lastLoginAt,
               ).getTime()
             : 0,
+        activeMembershipId:
+          defaultMembership?.id ||
+          null,
         membershipRevision,
         permissionsRevision,
       });
 
     const actor:
       AuthenticatedSessionActor = {
-      id: loaded.id,
+      id:
+        loaded.id,
       accountId:
         loaded.accountId,
       email:
@@ -436,13 +487,36 @@ export class AuthService {
       phone:
         loaded.phone,
       role:
-        loaded.role,
+        fallbackRole,
       fullName:
         loaded.fullName,
       active:
         loaded.active,
       lastLoginAt:
         loaded.lastLoginAt,
+
+      activeMembershipId:
+        defaultMembership?.id ||
+        null,
+      activeRole:
+        defaultMembership?.role ||
+        null,
+      schoolId:
+        defaultMembership?.schoolId ??
+        null,
+      branchId:
+        defaultMembership?.branchId ??
+        null,
+      teacherId:
+        defaultMembership?.teacherId ??
+        null,
+      studentId:
+        defaultMembership?.studentId ??
+        null,
+      parentId:
+        defaultMembership?.parentId ??
+        null,
+
       account: {
         id:
           loaded.account.id,
@@ -459,6 +533,7 @@ export class AuthService {
         status:
           loaded.account.status,
       },
+
       memberships,
       membershipRevision,
       permissionsRevision,
@@ -476,14 +551,43 @@ export class AuthService {
     includeToken: boolean,
   ) {
     const payload = {
-      sub: actor.id,
-      id: actor.id,
+      sub:
+        actor.id,
+      id:
+        actor.id,
       accountId:
         actor.accountId,
       email:
         actor.email,
+
+      /*
+       * Keep the fallback AppUser role for compatibility, while also carrying
+       * explicit membership context for membership-aware authorization.
+       */
       role:
         actor.role,
+      activeMembershipId:
+        actor.activeMembershipId ||
+        null,
+      activeRole:
+        actor.activeRole ||
+        null,
+      schoolId:
+        actor.schoolId ||
+        null,
+      branchId:
+        actor.branchId ||
+        null,
+      teacherId:
+        actor.teacherId ||
+        null,
+      studentId:
+        actor.studentId ||
+        null,
+      parentId:
+        actor.parentId ||
+        null,
+
       membershipRevision:
         actor.membershipRevision,
       permissionsRevision:
@@ -494,7 +598,8 @@ export class AuthService {
 
     return {
       user: {
-        id: actor.id,
+        id:
+          actor.id,
         accountId:
           actor.accountId,
         fullName:
@@ -502,13 +607,39 @@ export class AuthService {
         email:
           actor.email,
         phone:
-          actor.phone || null,
+          actor.phone ||
+          null,
         role:
           actor.role,
         active:
-          actor.active !== false,
+          actor.active !==
+          false,
         lastLoginAt:
-          actor.lastLoginAt || null,
+          actor.lastLoginAt ||
+          null,
+
+        activeMembershipId:
+          actor.activeMembershipId ||
+          null,
+        activeRole:
+          actor.activeRole ||
+          null,
+        schoolId:
+          actor.schoolId ||
+          null,
+        branchId:
+          actor.branchId ||
+          null,
+        teacherId:
+          actor.teacherId ||
+          null,
+        studentId:
+          actor.studentId ||
+          null,
+        parentId:
+          actor.parentId ||
+          null,
+
         memberships:
           actor.memberships,
         membershipRevision:
@@ -524,6 +655,13 @@ export class AuthService {
 
       account:
         actor.account,
+
+      activeMembershipId:
+        actor.activeMembershipId ||
+        null,
+      activeRole:
+        actor.activeRole ||
+        null,
 
       membershipRevision:
         actor.membershipRevision,
@@ -558,35 +696,58 @@ export class AuthService {
       .filter(
         (membership) =>
           membership.active !==
-          false,
+            false &&
+          membership.status !==
+            "suspended" &&
+          membership.status !==
+            "revoked" &&
+          membership.status !==
+            "expired",
       )
       .map(
-        (membership) => ({
-          id:
-            membership.id,
-          accountId:
-            membership.accountId,
-          role:
-            membership.role,
-          schoolId:
-            membership.schoolId ??
-            null,
-          branchId:
-            membership.branchId ??
-            null,
-          teacherId:
-            membership.teacherId ??
-            null,
-          studentId:
-            membership.studentId ??
-            null,
-          parentId:
-            membership.parentId ??
-            null,
-          active:
-            membership.active !==
-            false,
-        }),
+        (membership) => {
+          const role =
+            this.requireRole(
+              membership.role,
+              `Membership ${membership.id || ""} has an invalid role.`,
+            );
+
+          return {
+            id:
+              String(
+                membership.id,
+              ),
+            accountId:
+              String(
+                membership.accountId,
+              ),
+            role,
+            schoolId:
+              membership.schoolId ??
+              null,
+            branchId:
+              membership.branchId ??
+              null,
+            teacherId:
+              membership.teacherId ??
+              null,
+            studentId:
+              membership.studentId ??
+              null,
+            parentId:
+              membership.parentId ??
+              null,
+            active:
+              membership.active !==
+              false,
+            status:
+              membership.status ??
+              null,
+            isDefault:
+              membership.isDefault ===
+              true,
+          };
+        },
       );
   }
 
@@ -598,33 +759,54 @@ export class AuthService {
         accountId,
       },
       orderBy: {
-        moduleKey: "asc",
+        moduleKey:
+          "asc",
       },
       select: {
-        id: true,
-        moduleKey: true,
-        moduleLabel: true,
-        owner: true,
-        admin: true,
-        branch: true,
-        teacher: true,
-        student: true,
-        parent: true,
-        accountant: true,
-        locked: true,
+        id:
+          true,
+        moduleKey:
+          true,
+        moduleLabel:
+          true,
+        owner:
+          true,
+        admin:
+          true,
+        branch:
+          true,
+        teacher:
+          true,
+        student:
+          true,
+        parent:
+          true,
+        accountant:
+          true,
+        locked:
+          true,
       },
     });
   }
 
   private revisionFor(
     value: unknown,
-  ) {
-    return createHash("sha256")
+  ): string {
+    return createHash(
+      "sha256",
+    )
       .update(
-        JSON.stringify(value),
+        JSON.stringify(
+          value,
+        ),
       )
-      .digest("hex")
-      .slice(0, 24);
+      .digest(
+        "hex",
+      )
+      .slice(
+        0,
+        24,
+      );
   }
 
   private async seedDefaultPermissionRules(
@@ -633,112 +815,198 @@ export class AuthService {
   ): Promise<void> {
     const modules = [
       {
-        moduleKey: "schools",
-        moduleLabel: "Schools",
-        owner: "yes",
-        admin: "yes",
-        branch: "no",
-        teacher: "no",
-        student: "no",
-        parent: "no",
-        accountant: "no",
+        moduleKey:
+          "schools",
+        moduleLabel:
+          "Schools",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "no",
+        teacher:
+          "no",
+        student:
+          "no",
+        parent:
+          "no",
+        accountant:
+          "no",
       },
       {
-        moduleKey: "branches",
-        moduleLabel: "Branches",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "no",
-        student: "no",
-        parent: "no",
-        accountant: "no",
+        moduleKey:
+          "branches",
+        moduleLabel:
+          "Branches",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "no",
+        student:
+          "no",
+        parent:
+          "no",
+        accountant:
+          "no",
       },
       {
-        moduleKey: "users",
-        moduleLabel: "Users & Memberships",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "no",
-        student: "no",
-        parent: "no",
-        accountant: "no",
+        moduleKey:
+          "users",
+        moduleLabel:
+          "Users & Memberships",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "no",
+        student:
+          "no",
+        parent:
+          "no",
+        accountant:
+          "no",
       },
       {
-        moduleKey: "academics",
-        moduleLabel: "Academic Setup",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "no",
-        student: "no",
-        parent: "no",
-        accountant: "no",
+        moduleKey:
+          "academics",
+        moduleLabel:
+          "Academic Setup",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "no",
+        student:
+          "no",
+        parent:
+          "no",
+        accountant:
+          "no",
       },
       {
-        moduleKey: "attendance",
-        moduleLabel: "Attendance",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "yes",
-        student: "yes",
-        parent: "yes",
-        accountant: "no",
+        moduleKey:
+          "attendance",
+        moduleLabel:
+          "Attendance",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "yes",
+        student:
+          "yes",
+        parent:
+          "yes",
+        accountant:
+          "no",
       },
       {
-        moduleKey: "assessment",
-        moduleLabel: "Assessment",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "yes",
-        student: "yes",
-        parent: "yes",
-        accountant: "no",
+        moduleKey:
+          "assessment",
+        moduleLabel:
+          "Assessment",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "yes",
+        student:
+          "yes",
+        parent:
+          "yes",
+        accountant:
+          "no",
       },
       {
-        moduleKey: "reports",
-        moduleLabel: "Reports",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "yes",
-        student: "yes",
-        parent: "yes",
-        accountant: "yes",
+        moduleKey:
+          "reports",
+        moduleLabel:
+          "Reports",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "yes",
+        student:
+          "yes",
+        parent:
+          "yes",
+        accountant:
+          "yes",
       },
       {
-        moduleKey: "finance",
-        moduleLabel: "Finance",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "no",
-        student: "no",
-        parent: "yes",
-        accountant: "yes",
+        moduleKey:
+          "finance",
+        moduleLabel:
+          "Finance",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "no",
+        student:
+          "no",
+        parent:
+          "yes",
+        accountant:
+          "yes",
       },
       {
-        moduleKey: "settings",
-        moduleLabel: "Settings",
-        owner: "yes",
-        admin: "yes",
-        branch: "yes",
-        teacher: "no",
-        student: "no",
-        parent: "no",
-        accountant: "no",
+        moduleKey:
+          "settings",
+        moduleLabel:
+          "Settings",
+        owner:
+          "yes",
+        admin:
+          "yes",
+        branch:
+          "yes",
+        teacher:
+          "no",
+        student:
+          "no",
+        parent:
+          "no",
+        accountant:
+          "no",
       },
     ];
 
+
     await tx.permissionRule.createMany({
-      data: modules.map((module) => ({
-        accountId,
-        ...module,
-      })),
-      skipDuplicates: true,
+      data:
+        modules.map(
+          (module) => ({
+            accountId,
+            ...module,
+          }),
+        ),
+      skipDuplicates:
+        true,
     });
   }
 }
