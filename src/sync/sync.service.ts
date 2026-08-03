@@ -230,6 +230,16 @@ const BLOCKED_PUSH_TABLES = new Set([
 
 const MEDIA_ASSETS_TABLE = "mediaAssets";
 
+/**
+ * Media fields that contain collections rather than one replaceable asset.
+ * Every item in these fields must keep its own SyncRecord and remain active
+ * beside sibling assets owned by the same record.
+ */
+const MULTI_MEDIA_FIELD_KEYS = new Set([
+  "gallery",
+  "schoolGalleryImages",
+]);
+
 const SCHOOL_REQUIRED_TABLES = new Set([
   "branches",
   "academicStructures",
@@ -2721,6 +2731,35 @@ export class SyncService {
     const ownerId = this.cleanId(payload.ownerId);
     const ownerTempKey = this.cleanString(payload.ownerTempKey);
 
+    /*
+     * The permanent client-generated media UUID is the first and strongest
+     * identity. Do not include deviceId: the same media asset may be pushed
+     * again from another device after pull/bootstrap.
+     */
+    if (args.localId) {
+      const byLocalId = await this.prisma.syncRecord.findFirst({
+        where: {
+          accountId: args.accountId,
+          tableName: MEDIA_ASSETS_TABLE,
+          localId: this.localIdToStorageString(
+            args.localId,
+            MEDIA_ASSETS_TABLE,
+          ),
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+
+      if (byLocalId) return byLocalId;
+    }
+
+    /*
+     * Multi-image fields intentionally share ownerTable + ownerId + fieldKey.
+     * A new localId therefore means a new sibling asset, never a replacement.
+     */
+    if (this.isMultiMediaField(fieldKey)) {
+      return null;
+    }
+
     const ownerIdentityKey =
       this.cleanString(payload.ownerIdentityKey) ||
       this.buildMediaIdentityKey({
@@ -2806,6 +2845,17 @@ export class SyncService {
     return null;
   }
 
+  private isMultiMediaField(
+    fieldKey?: string | null,
+  ): boolean {
+    const normalizedFieldKey =
+      this.cleanString(fieldKey) || "";
+
+    return MULTI_MEDIA_FIELD_KEYS.has(
+      normalizedFieldKey,
+    );
+  }
+
   private async afterUpsertRecord(
     saved: any,
     incoming: NormalizedSyncPushRecord,
@@ -2870,9 +2920,18 @@ export class SyncService {
         });
     }
 
-    await this.deactivateReplacedMediaAssets(
-      finalRecord,
-    );
+    const finalPayload =
+      (finalRecord.payload || {}) as Record<string, any>;
+
+    if (
+      !this.isMultiMediaField(
+        this.cleanString(finalPayload.fieldKey),
+      )
+    ) {
+      await this.deactivateReplacedMediaAssets(
+        finalRecord,
+      );
+    }
   }
 
   private async deactivateReplacedMediaAssets(
@@ -2911,6 +2970,11 @@ export class SyncService {
       this.cleanString(
         activePayload.fieldKey,
       );
+
+    // Collection fields preserve every active sibling asset.
+    if (this.isMultiMediaField(fieldKey)) {
+      return;
+    }
 
     const ownerId =
       this.cleanId(

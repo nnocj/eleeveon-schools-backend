@@ -109,7 +109,13 @@ const ALLOWED_FIELD_KEYS =
     "reportCardBackgroundImage",
     "reportCardWatermark",
     "reportCardSignatureImage",
+
+    // Canonical multi-image Branch Settings gallery field.
+    "gallery",
+
+    // Legacy Branch Settings gallery alias retained for existing clients.
     "schoolGalleryImages",
+
     "watermark",
     "background",
     "attachment",
@@ -169,6 +175,12 @@ export class MediaService {
       String(
         dto.fieldKey || "",
       ).trim();
+
+    /*
+     * Do not collapse gallery uploads by ownerTable + ownerId + fieldKey.
+     * Every request carries its own mediaAssets.assetId and MediaStorageService
+     * generates a unique immutable filename for the uploaded binary.
+     */
 
     const ownerId =
       this.optionalString(
