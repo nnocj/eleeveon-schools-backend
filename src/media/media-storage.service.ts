@@ -9,6 +9,11 @@
  *
  * The returned URL is served through MediaController GET /media/files/:account/:file.
  *
+ * Portal Highlight media:
+ * - dashboard highlights may use images or short videos;
+ * - supported video formats are MP4, WebM and QuickTime/MOV;
+ * - the default limit is 15 MB unless MEDIA_MAX_FILE_SIZE_BYTES overrides it.
+ *
  * For production at scale, replace this service with S3, Cloudflare R2,
  * Supabase Storage, Google Cloud Storage, or another object-storage provider.
  */
@@ -50,7 +55,19 @@ const MIME_EXTENSION: Record<string, string> = {
   "image/gif": ".gif",
   "image/avif": ".avif",
   "image/svg+xml": ".svg",
+
+  // Portal Highlight video support.
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+  "video/quicktime": ".mov",
 };
+
+const EXTENSION_MIME: Record<string, string> = Object.fromEntries(
+  Object.entries(MIME_EXTENSION).map(([mimeType, extension]) => [
+    extension,
+    mimeType,
+  ]),
+);
 
 @Injectable()
 export class MediaStorageService {
@@ -68,7 +85,7 @@ export class MediaStorageService {
     return Number.isFinite(configured) &&
       configured > 0
       ? configured
-      : 8 * 1024 * 1024;
+      : 15 * 1024 * 1024;
   }
 
   get allowedMimeTypes() {
@@ -136,9 +153,14 @@ export class MediaStorageService {
     originalName: string,
     mimeType: string,
   ) {
+    const normalizedMimeType =
+      String(mimeType || "")
+        .trim()
+        .toLowerCase();
+
     const known =
       MIME_EXTENSION[
-        mimeType.toLowerCase()
+        normalizedMimeType
       ];
 
     if (known) {
@@ -185,7 +207,9 @@ export class MediaStorageService {
     const mimeType =
       String(
         file.mimetype || "",
-      ).toLowerCase();
+      )
+        .trim()
+        .toLowerCase();
 
     if (
       !this.allowedMimeTypes.has(
@@ -350,18 +374,10 @@ export class MediaStorageService {
         filename,
       ).toLowerCase();
 
-    const match =
-      Object.entries(
-        MIME_EXTENSION,
-      ).find(
-        (
-          [, value],
-        ) =>
-          value === extension,
-      );
-
     return (
-      match?.[0] ||
+      EXTENSION_MIME[
+        extension
+      ] ||
       "application/octet-stream"
     );
   }

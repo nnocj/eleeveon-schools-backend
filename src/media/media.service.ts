@@ -12,7 +12,8 @@
  * - ownerId is the permanent string ID of the owner record;
  * - ownerTempKey supports uploads created before an owner is finalized;
  * - ownerCloudId and ownerLocalId are no longer supported;
- * - website builder records use the same ownerTable + ownerId + fieldKey contract.
+ * - website builder and Portal Highlight records use the same
+ *   ownerTable + ownerId + fieldKey contract.
  */
 
 import {
@@ -73,6 +74,15 @@ export const WEBSITE_MEDIA_FIELD_KEYS = [
   "attachment",
 ] as const;
 
+export const PORTAL_HIGHLIGHT_MEDIA_OWNER_TABLE =
+  "portalHighlights" as const;
+
+export const PORTAL_HIGHLIGHT_MEDIA_FIELD_KEYS = [
+  "media",
+  "posterMedia",
+  "thumbnailMedia",
+] as const;
+
 const ALLOWED_OWNER_TABLES =
   new Set<string>([
     "schools",
@@ -90,6 +100,10 @@ const ALLOWED_OWNER_TABLES =
     "announcements",
     "reportCards",
     "reportCardTemplates",
+
+    // Dashboard image/video highlights.
+    PORTAL_HIGHLIGHT_MEDIA_OWNER_TABLE,
+
     ...WEBSITE_MEDIA_OWNER_TABLES,
   ]);
 
@@ -120,6 +134,10 @@ const ALLOWED_FIELD_KEYS =
     "background",
     "attachment",
     "receipt",
+
+    // Portal Highlight primary media, poster and thumbnail.
+    ...PORTAL_HIGHLIGHT_MEDIA_FIELD_KEYS,
+
     ...WEBSITE_MEDIA_FIELD_KEYS,
   ]);
 
@@ -177,9 +195,12 @@ export class MediaService {
       ).trim();
 
     /*
-     * Do not collapse gallery uploads by ownerTable + ownerId + fieldKey.
-     * Every request carries its own mediaAssets.assetId and MediaStorageService
-     * generates a unique immutable filename for the uploaded binary.
+     * Do not collapse gallery or Portal Highlight uploads by
+     * ownerTable + ownerId + fieldKey.
+     *
+     * Every request carries its own mediaAssets.assetId and
+     * MediaStorageService generates a unique immutable filename
+     * for the uploaded binary.
      */
 
     const ownerId =
@@ -228,6 +249,21 @@ export class MediaService {
         `Media uploads are not allowed for field ${
           fieldKey || "unknown"
         }.`,
+      );
+    }
+
+    if (
+      ownerTable ===
+        PORTAL_HIGHLIGHT_MEDIA_OWNER_TABLE &&
+      !PORTAL_HIGHLIGHT_MEDIA_FIELD_KEYS.includes(
+        fieldKey as
+          (typeof PORTAL_HIGHLIGHT_MEDIA_FIELD_KEYS)[number],
+      )
+    ) {
+      throw new BadRequestException(
+        `Portal Highlight uploads must use one of: ${PORTAL_HIGHLIGHT_MEDIA_FIELD_KEYS.join(
+          ", ",
+        )}.`,
       );
     }
 
