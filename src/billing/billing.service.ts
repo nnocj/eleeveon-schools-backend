@@ -871,25 +871,36 @@ export class BillingService {
   // =====================================================
 
   async createSubscriptionQuote(
-    actor: AuthUser,
-    dto: CreateSubscriptionQuoteDto,
-  ) {
-    if (!actor.accountId) {
-      throw new BadRequestException("Account ID is missing from logged-in user.");
-    }
-
-    return this.subscriptionChanges.createQuote({
-      accountId: actor.accountId,
-      toPlanId: dto.planId,
-      billingCycle: dto.billingCycle,
-      changeType: dto.changeType,
-      effectiveMode: dto.effectiveMode,
-      privateOfferId: dto.privateOfferId,
-      pricingOverrideId: dto.pricingOverrideId,
-      taxRatePercent: dto.taxRatePercent,
-      requestedByUserId: actor.id,
-    });
+  actor: AuthUser,
+  dto: CreateSubscriptionQuoteDto,
+) {
+  if (!actor.accountId) {
+    throw new BadRequestException(
+      "Account ID is missing from logged-in user.",
+    );
   }
+
+  const toPlanId = dto.toPlanId ?? dto.planId;
+
+  if (!toPlanId) {
+    throw new BadRequestException(
+      "A destination plan ID is required.",
+    );
+  }
+
+  return this.subscriptionChanges.createQuote({
+    accountId: actor.accountId,
+    toPlanId,
+    billingCycle: dto.billingCycle,
+    changeType: dto.changeType,
+    effectiveMode: dto.effectiveMode,
+    privateOfferId: dto.privateOfferId,
+    privateOfferCode: dto.privateOfferCode,
+    pricingOverrideId: dto.pricingOverrideId,
+    taxRatePercent: dto.taxRatePercent,
+    requestedByUserId: actor.id,
+  });
+}
 
   getSubscriptionQuote(actor: AuthUser, id: string) {
     return this.subscriptionChanges.getForAccount(actor.accountId, id);

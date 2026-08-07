@@ -1,5 +1,15 @@
-import { IsEmail, IsIn, IsOptional, IsString } from "class-validator";
+import {
+  IsEmail,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+} from "class-validator";
 
+/**
+ * Payment details used by the existing
+ * POST /billing/subscription-quotes/:id/pay endpoint.
+ */
 export class PaySubscriptionChangeDto {
   @IsIn(["momo", "card", "bank", "cash", "manual"])
   paymentMethod!: "momo" | "card" | "bank" | "cash" | "manual";
@@ -23,10 +33,24 @@ export class PaySubscriptionChangeDto {
   @IsOptional()
   @IsIn(["mtn", "telecel", "airteltigo"])
   momoNetwork?: "mtn" | "telecel" | "airteltigo";
-}
 
-export class CancelSubscriptionChangeDto {
   @IsOptional()
   @IsString()
-  reason?: string;
+  note?: string;
+}
+
+/**
+ * Used by the newer change-order application endpoint.
+ */
+export class ApplySubscriptionChangeDto {
+  @IsUUID()
+  changeOrderId!: string;
+
+  @IsOptional()
+  @IsUUID()
+  paymentId?: string;
+
+  @IsOptional()
+  @IsIn(["payment", "manual", "complimentary"])
+  applicationSource?: "payment" | "manual" | "complimentary";
 }

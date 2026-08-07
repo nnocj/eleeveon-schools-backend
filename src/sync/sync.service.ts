@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthUser } from "../common/auth-user";
 import { RealtimeEventsService } from "../realtime/realtime-events.service";
+import { SubscriptionSyncPolicyService } from "./subscription-sync-policy.service";
 import {
   DEFAULT_SYNC_PULL_LIMIT,
   MAX_SYNC_PULL_LIMIT,
@@ -14,6 +15,19 @@ import {
   WorkspaceBootstrapDto,
   type SyncPullCursor,
 } from "./dto/sync.dto";
+import {
+  BLOCKED_PUSH_TABLES,
+  BRANCH_REQUIRED_TABLES,
+  LOCAL_FIRST_TABLES,
+  LOCAL_FIRST_SYNC_TABLE_NAMES,
+  PLATFORM_CACHE_TABLE_NAMES,
+  SCHOOL_REQUIRED_TABLES,
+  WORKSPACE_BOOTSTRAP_SCHEMA_VERSION,
+  WORKSPACE_BOOTSTRAP_TABLES,
+  type WorkspaceBootstrapRole,
+  validateSyncTableRegistry,
+} from "./sync-table-registry";
+
 
 /**
  * Phase 2 note: existing synchronization behaviour is preserved here.
@@ -54,180 +68,6 @@ type NormalizedSyncPushRecord = Omit<SyncPushRecordDto, "localId"> & {
  * If a table exists in Dexie/PUSH_SYNC_TABLES but is missing here,
  * pushSync will fail with: "<table> is not allowed to be pushed from the browser."
  */
-const LOCAL_FIRST_TABLES = new Set([
-  "schools",
-  "branches",
-  "academicStructures",
-  "academicPeriods",
-  "organizations",
-  "students",
-  "teachers",
-  "parents",
-  "studentParents",
-  "classes",
-  "subjects",
-  "programs",
-  "curriculums",
-  "curriculumPathways",
-  "curriculumSubjects",
-  "classSubjects",
-  "subjectPrerequisites",
-  "studentCurriculums",
-  "subjectOfferings",
-  "assignments",
-  "classTeachers",
-  "studentEnrollments",
-  "gradingSystems",
-  "gradeRules",
-  "assessmentStructures",
-  "assessmentStructureItems",
-  "assessmentApplicabilities",
-  "assessmentComponents",
-  "assessmentEntries",
-  "computedResults",
-  "attendance",
-  "studentAttendanceSummaries",
-  "teacherAttendance",
-
-  // Attendance identity and verification subsystem.
-  // Keep aligned with frontend db.ts and syncTables.ts.
-  "attendanceSessions",
-  "attendanceDevices",
-  "attendanceCredentials",
-  "attendanceCredentialEvents",
-  "attendanceCaptureEvents",
-  "attendanceEvidenceAssets",
-
-  // Shared identity, safety, pickup, visitor, transport and emergency platform.
-  // Keep aligned with frontend db.ts and syncTables.ts.
-  "identityCredentials",
-  "identityCredentialDesignSettings",
-  "identityCredentialEvents",
-  "identityDevices",
-  "identityAccessPoints",
-  "identityActivityEvents",
-  "identityEvidenceAssets",
-  "studentIdentityCards",
-  "pickupAuthorizations",
-  "studentPickupEvents",
-  "visitorProfiles",
-  "visitorVisits",
-  "schoolVehicles",
-  "transportRoutes",
-  "transportStops",
-  "studentTransportAssignments",
-  "transportJourneys",
-  "transportJourneyEvents",
-  "emergencyRollCallSessions",
-  "emergencyRollCallEntries",
-
-  "reportCards",
-  "reportCardItems",
-
-  // Report template system.
-  // These must match the frontend LOCAL_FIRST_SYNC_TABLES registry.
-  "reportCardTemplates",
-  "reportCardTemplateSettings",
-  "reportCardTemplateAssignments",
-
-  "studentReportSnapshots",
-  "studentPromotions",
-  "feeStructures",
-  "payments",
-  "incomes",
-  "expenses",
-  "currencies",
-  "schoolCurrencySettings",
-
-  // Branch wallet / payout local-first records.
-  // Keep this aligned with frontend syncTables.ts and Dexie db.ts.
-  "schoolPayoutSettings",
-  "paymentSettlements",
-  "withdrawalRequests",
-
-  "paymentIntents",
-  "paymentTransactions",
-  "paymentRefunds",
-  "studentFeeInvoices",
-  "studentFeeInvoiceItems",
-  "studentFeePayments",
-  "staffPayrollProfiles",
-  "payrollRuns",
-  "payrollItems",
-  "staffPaymentRecords",
-  "announcements",
-  "announcementRecipients",
-  "portalHighlights",
-  "messageThreads",
-  "messages",
-  "communicationLogs",
-  "notificationTemplates",
-
-  // Media asset metadata is local-first and safe to push.
-  // Heavy binary/blob data must stay out of normal SyncRecord payloads.
-  "mediaAssets",
-
-  "schoolBranchSettings",
-  "calendarEvents",
-  "calendarEventParticipants",
-  "calendarEventReminders",
-  "calendarEventResponses",
-  "scheduleTimetables",
-  "scheduleSessions",
-  "scheduleResources",
-  "scheduleConflicts",
-
-  // Public school website and template content.
-  // These must stay aligned with the frontend LOCAL_FIRST_SYNC_TABLES registry.
-  "websiteSettings",
-  "websiteTemplateSettings",
-  "websiteTemplateAssignments",
-  "websitePages",
-  "websiteSections",
-  "websiteNavigationItems",
-  "websiteDomains",
-  "websiteDomainAliases",
-  "websiteForms",
-  "websiteFormSubmissions",
-  "websiteRevisions",
-]);
-
-const BLOCKED_PUSH_TABLES = new Set([
-  "accounts",
-  "appUsers",
-  "userMemberships",
-  "permissionRules",
-  "subscriptionPlans",
-  "accountSubscriptions",
-  "invoices",
-  "appPayments",
-  "paymentProviderEvents",
-  "billingEvents",
-  "syncDevices",
-  "syncConflicts",
-  "apiClients",
-  "apiKeys",
-  "webhooks",
-  "webhookLogs",
-  "integrationMappings",
-  "auditLogs",
-  "backgroundJobs",
-  "storageUsages",
-  "accountFeatureFlags",
-  "accountSystemSettings",
-  "notificationDeliveryLogs",
-  "userSessions",
-
-  // Browser-local binary storage must never be pushed through SyncRecord.
-  // Only mediaAssets metadata may use normal sync.
-  "mediaBlobs",
-
-  // Local database protection stores must never enter browser SyncRecord push.
-  "migrationJournal",
-  "databaseRecoveryBackups",
-  "syncQuarantine",
-]);
-
 const MEDIA_ASSETS_TABLE = "mediaAssets";
 
 /**
@@ -240,124 +80,6 @@ const MULTI_MEDIA_FIELD_KEYS = new Set([
   "schoolGalleryImages",
 ]);
 
-const SCHOOL_REQUIRED_TABLES = new Set([
-  "branches",
-  "academicStructures",
-  "academicPeriods",
-  "programs",
-  "curriculums",
-  "curriculumPathways",
-  "curriculumSubjects",
-  "subjectPrerequisites",
-  "gradingSystems",
-  "gradeRules",
-  "assessmentStructures",
-  "assessmentStructureItems",
-  "reportCardTemplates",
-  "reportCardTemplateSettings",
-  "reportCardTemplateAssignments",
-  "feeStructures",
-  "schoolCurrencySettings",
-  "schoolPayoutSettings",
-
-  // Public website records are school-owned. branchId is optional because a
-  // school may publish one website spanning all branches.
-  "websiteSettings",
-  "websiteTemplateSettings",
-  "websiteTemplateAssignments",
-  "websitePages",
-  "websiteSections",
-  "websiteNavigationItems",
-  "websiteDomains",
-  "websiteDomainAliases",
-  "websiteForms",
-  "websiteFormSubmissions",
-  "websiteRevisions",
-]);
-
-const BRANCH_REQUIRED_TABLES = new Set([
-  "students",
-  "teachers",
-  "parents",
-  "studentParents",
-  "classes",
-  "classSubjects",
-  "classTeachers",
-  "studentCurriculums",
-  "subjectOfferings",
-  "assignments",
-  "studentEnrollments",
-  "assessmentApplicabilities",
-  "assessmentComponents",
-  "assessmentEntries",
-  "computedResults",
-  "attendance",
-  "studentAttendanceSummaries",
-  "teacherAttendance",
-
-  // Branch-scoped attendance identity and verification records.
-  "attendanceSessions",
-  "attendanceDevices",
-  "attendanceCredentials",
-  "attendanceCredentialEvents",
-  "attendanceCaptureEvents",
-  "attendanceEvidenceAssets",
-
-  // Shared identity, safety, pickup, visitor, transport and emergency platform.
-  // Keep aligned with frontend db.ts and syncTables.ts.
-  "identityCredentials",
-  "identityCredentialDesignSettings",
-  "identityCredentialEvents",
-  "identityDevices",
-  "identityAccessPoints",
-  "identityActivityEvents",
-  "identityEvidenceAssets",
-  "studentIdentityCards",
-  "pickupAuthorizations",
-  "studentPickupEvents",
-  "visitorProfiles",
-  "visitorVisits",
-  "schoolVehicles",
-  "transportRoutes",
-  "transportStops",
-  "studentTransportAssignments",
-  "transportJourneys",
-  "transportJourneyEvents",
-  "emergencyRollCallSessions",
-  "emergencyRollCallEntries",
-
-  "reportCards",
-  "reportCardItems",
-  "studentReportSnapshots",
-  "studentPromotions",
-  "payments",
-  "incomes",
-  "expenses",
-  "paymentIntents",
-  "paymentTransactions",
-  "paymentRefunds",
-  "paymentSettlements",
-  "withdrawalRequests",
-  "studentFeeInvoices",
-  "studentFeeInvoiceItems",
-  "studentFeePayments",
-  "staffPayrollProfiles",
-  "payrollRuns",
-  "payrollItems",
-  "staffPaymentRecords",
-  "schoolBranchSettings",
-]);
-
-/**
- * Strict mediaAssets payload allow-list.
- * Only safe metadata, previews and remote references cross devices.
- *
- * mediaBlobs remain browser-local, so another device can only display an
- * updated image if mediaAssets carries one of:
- * - previewDataUrl
- * - thumbnailDataUrl
- * - remoteUrl/publicUrl
- */
 const SAFE_MEDIA_ASSET_FIELDS = new Set([
   "accountId",
   "schoolId",
@@ -399,165 +121,32 @@ const SAFE_MEDIA_ASSET_FIELDS = new Set([
   "deviceId",
 ]);
 
-type WorkspaceBootstrapRole =
-  | "developer"
-  | "platform_team"
-  | "super_admin"
-  | "admin"
-  | "school_admin"
-  | "branch_admin"
-  | "teacher"
-  | "student"
-  | "parent"
-  | "accountant";
-
-const WORKSPACE_BOOTSTRAP_TABLES: Record<
-  WorkspaceBootstrapRole,
-  readonly string[]
-> = {
-  developer: [
-    "schools",
-    "branches",
-    "schoolBranchSettings",
-    "websiteSettings",
-    "websiteTemplateSettings",
-    "websiteTemplateAssignments",
-    "websitePages",
-    "websiteSections",
-    "websiteNavigationItems",
-    "websiteDomains",
-    "websiteDomainAliases",
-    "websiteForms",
-    "websiteFormSubmissions",
-    "websiteRevisions",
-    "mediaAssets",
-  ],
-  platform_team: [
-    "schools",
-    "branches",
-    "schoolBranchSettings",
-    "websiteSettings",
-    "websiteTemplateSettings",
-    "websiteTemplateAssignments",
-    "websitePages",
-    "websiteSections",
-    "websiteNavigationItems",
-    "websiteDomains",
-    "websiteDomainAliases",
-    "websiteForms",
-    "websiteFormSubmissions",
-    "websiteRevisions",
-    "mediaAssets",
-  ],
-  // Administrative workspaces receive the complete local-first registry.
-  // Never replace these with a hand-written subset; doing so previously omitted
-  // organizations, mediaAssets and other branch modules.
-  super_admin: [...LOCAL_FIRST_TABLES],
-  admin: [...LOCAL_FIRST_TABLES],
-  school_admin: [...LOCAL_FIRST_TABLES],
-  branch_admin: [...LOCAL_FIRST_TABLES],
-  teacher: [
-    "schools",
-    "branches",
-    "schoolBranchSettings",
-    "academicPeriods",
-    "classes",
-    "subjects",
-    "classSubjects",
-    "classTeachers",
-    "assignments",
-    "students",
-    "studentEnrollments",
-    "assessmentStructures",
-    "assessmentStructureItems",
-    "assessmentApplicabilities",
-    "teacherAttendance",
-    "identityCredentials",
-    "identityCredentialDesignSettings",
-    "identityCredentialEvents",
-    "identityActivityEvents",
-    "identityDevices",
-    "identityAccessPoints",
-    "emergencyRollCallSessions",
-    "emergencyRollCallEntries",
-  ],
-  student: [
-    "schools",
-    "branches",
-    "schoolBranchSettings",
-    "academicPeriods",
-    "students",
-    "studentEnrollments",
-    "classes",
-    "subjects",
-    "classSubjects",
-    "computedResults",
-    "studentAttendanceSummaries",
-    "reportCards",
-    "reportCardItems",
-    "announcements",
-    "identityCredentials",
-    "identityCredentialDesignSettings",
-    "identityCredentialEvents",
-    "identityActivityEvents",
-    "studentIdentityCards",
-    "studentTransportAssignments",
-    "transportJourneys",
-    "transportJourneyEvents",
-    "schoolVehicles",
-    "transportRoutes",
-    "transportStops",
-    "emergencyRollCallSessions",
-    "emergencyRollCallEntries",
-  ],
-  parent: [
-    "schools",
-    "branches",
-    "schoolBranchSettings",
-    "parents",
-    "studentParents",
-    "students",
-    "studentEnrollments",
-    "classes",
-    "computedResults",
-    "studentAttendanceSummaries",
-    "reportCards",
-    "reportCardItems",
-    "announcements",
-    "identityCredentials",
-    "identityCredentialDesignSettings",
-    "identityCredentialEvents",
-    "identityActivityEvents",
-    "pickupAuthorizations",
-    "studentPickupEvents",
-    "studentTransportAssignments",
-    "transportJourneys",
-    "transportJourneyEvents",
-    "schoolVehicles",
-    "transportRoutes",
-    "transportStops",
-    "emergencyRollCallSessions",
-    "emergencyRollCallEntries",
-  ],
-  accountant: [...LOCAL_FIRST_TABLES],
-};
-
-/**
- * Phase 21 complete-workspace bootstrap does not impose a record-count cap.
- * Administrative workspaces must not open with a silently truncated branch.
- * HTTP body limits and infrastructure limits should be configured separately.
- */
-const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 2;
-
-
 @Injectable()
 export class SyncService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeEventsService,
-  ) {}
+    private readonly syncPolicy: SubscriptionSyncPolicyService,
+  ) {
+    const registryIssues = validateSyncTableRegistry();
+    if (registryIssues.length) {
+      throw new Error(
+        [
+          "Invalid backend sync table registry:",
+          ...registryIssues.map((issue) => `- ${issue}`),
+        ].join("\n"),
+      );
+    }
+  }
 
   async status(user?: { accountId?: string; email?: string; role?: string }) {
+    const access = user?.accountId
+      ? await this.syncPolicy.resolve({
+          accountId: user.accountId,
+          role: user.role,
+        })
+      : null;
+
     return {
       ok: true,
       service: "Eleeveon Sync Service",
@@ -566,8 +155,33 @@ export class SyncService {
       accountId: user?.accountId,
       user: user?.email,
       role: user?.role,
+      syncPolicy: access,
+      registry: {
+        localFirstTables: LOCAL_FIRST_SYNC_TABLE_NAMES.length,
+        platformCacheTables: PLATFORM_CACHE_TABLE_NAMES.length,
+      },
       serverTime: Date.now(),
     };
+  }
+
+  async policy(actor: AuthUser) {
+    const accountId = this.requireActorAccount(
+      actor,
+      actor.accountId,
+    );
+
+    if (!accountId) {
+      throw new BadRequestException(
+        "Account session is missing. Please log out and sign in again.",
+      );
+    }
+
+    await this.ensureAccount(accountId);
+
+    return this.syncPolicy.resolveFrontendPolicy({
+      accountId,
+      role: actor.role,
+    });
   }
 
   async push(actor: AuthUser, dto: PushSyncDto) {
@@ -585,7 +199,12 @@ export class SyncService {
     }
 
     await this.ensureAccount(accountId);
-    await this.touchDevice({ accountId, deviceId: dto.deviceId, lastPushAt: new Date() });
+    await this.syncPolicy.assertCanPush(actor, accountId);
+    await this.touchDevice({
+      accountId,
+      deviceId: dto.deviceId,
+      lastPushAt: new Date(),
+    });
 
     for (const record of dto.records || []) {
       try {
@@ -675,6 +294,7 @@ export class SyncService {
     }
 
     await this.ensureAccount(accountId);
+    await this.syncPolicy.assertCanPull(actor, accountId);
     await this.touchDevice({
       accountId,
       deviceId: dto.deviceId,
@@ -867,6 +487,11 @@ export class SyncService {
       );
 
     await this.ensureAccount(
+      accountId,
+    );
+
+    await this.syncPolicy.assertCanWorkspaceBootstrap(
+      actor,
       accountId,
     );
 
@@ -1095,7 +720,16 @@ export class SyncService {
     if (!accountId) throw new BadRequestException("Account session is missing.");
 
     await this.ensureAccount(accountId);
-    await this.touchDevice({ accountId, userId: user.id, deviceId: dto?.deviceId, lastSeenAt: new Date() });
+    await this.syncPolicy.assertCanPlatformCache(
+      user as AuthUser,
+      accountId,
+    );
+    await this.touchDevice({
+      accountId,
+      userId: user.id,
+      deviceId: dto?.deviceId,
+      lastSeenAt: new Date(),
+    });
 
     const [platformCache, syncStatus] = await Promise.all([
       this.platformCache(user as AuthUser, { accountId, deviceId: dto?.deviceId, since: dto?.since }),
@@ -1116,63 +750,30 @@ export class SyncService {
     if (!accountId) throw new BadRequestException("Account session is missing.");
 
     await this.ensureAccount(accountId);
-    await this.touchDevice({ accountId, deviceId: dto.deviceId, lastSeenAt: new Date() });
+    await this.syncPolicy.assertCanPlatformCache(actor, accountId);
+    await this.touchDevice({
+      accountId,
+      deviceId: dto.deviceId,
+      lastSeenAt: new Date(),
+    });
 
     const sinceDate = dto.since ? new Date(Number(dto.since)) : undefined;
-
-    const [
-      account,
-      users,
-      memberships,
-      permissionRules,
-      subscriptionPlans,
-      accountSubscription,
-      invoices,
-      payments,
-      billingEvents,
-      syncDevices,
-      syncConflicts,
-      apiClients,
-      webhooks,
-      webhookLogs,
-      integrationMappings,
-      auditLogs,
-      backgroundJobs,
-      storageUsages,
-      featureFlags,
-      systemSettings,
-      notificationLogs,
-    ] = await Promise.all([
-      this.prisma.account.findUnique({ where: { id: accountId } }),
-      this.prisma.appUser.findMany({ where: { accountId }, orderBy: { updatedAt: "desc" }, take: 1000 }),
-      this.prisma.userMembership.findMany({ where: { accountId }, orderBy: { updatedAt: "desc" }, take: 2000 }),
-      this.prisma.permissionRule.findMany({ where: { accountId }, orderBy: { updatedAt: "desc" } }),
-      this.prisma.subscriptionPlan.findMany({ where: { active: true }, orderBy: { priceMonthly: "asc" } }),
-      this.prisma.accountSubscription.findUnique({ where: { accountId }, include: { plan: true } }),
-      this.prisma.invoice.findMany({ where: { accountId, ...(sinceDate ? { updatedAt: { gte: sinceDate } } : {}) }, orderBy: { updatedAt: "desc" }, take: 100 }),
-      this.prisma.appPayment.findMany({ where: { accountId, ...(sinceDate ? { updatedAt: { gte: sinceDate } } : {}) }, orderBy: { updatedAt: "desc" }, take: 100 }),
-      this.prisma.billingEvent.findMany({ where: { accountId, ...(sinceDate ? { createdAt: { gte: sinceDate } } : {}) }, orderBy: { createdAt: "desc" }, take: 100 }),
-      this.prisma.syncDevice.findMany({ where: { accountId }, orderBy: { updatedAt: "desc" }, take: 100 }),
-      this.prisma.syncConflict.findMany({ where: { accountId, status: { in: ["open", "resolved", "ignored"] } }, orderBy: { detectedAt: "desc" }, take: 100 }),
-      this.prisma.apiClient.findMany({ where: { accountId }, orderBy: { updatedAt: "desc" }, take: 100 }),
-      this.prisma.webhook.findMany({ where: { accountId }, orderBy: { updatedAt: "desc" }, take: 100 }),
-      this.prisma.webhookLog.findMany({ where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
-      this.prisma.integrationMapping.findMany({ where: { accountId, active: true }, orderBy: { updatedAt: "desc" }, take: 500 }),
-      this.prisma.auditLog.findMany({ where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
-      this.prisma.backgroundJob.findMany({ where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
-      this.prisma.storageUsage.findUnique({ where: { accountId } }),
-      this.prisma.accountFeatureFlag.findMany({ where: { accountId }, orderBy: { key: "asc" } }),
-      this.prisma.accountSystemSetting.findMany({ where: { accountId }, orderBy: { key: "asc" } }),
-      this.prisma.notificationDeliveryLog.findMany({ where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
-    ]);
-
     const records: any[] = [];
+    const unavailableTables: string[] = [];
+    const prisma = this.prisma as unknown as Record<string, any>;
 
     const add = (tableName: string, rowOrRows: any) => {
-      const rows = Array.isArray(rowOrRows) ? rowOrRows : rowOrRows ? [rowOrRows] : [];
+      const rows = Array.isArray(rowOrRows)
+        ? rowOrRows
+        : rowOrRows
+          ? [rowOrRows]
+          : [];
 
       for (const row of rows) {
-        const payload = this.toPlain(row);
+        const payload = this.sanitizePlatformCachePayload(
+          tableName,
+          this.toPlain(row),
+        );
 
         records.push({
           tableName,
@@ -1186,29 +787,201 @@ export class SyncService {
       }
     };
 
-    add("accounts", account);
-    add("appUsers", users.map((u: any) => ({ ...u, passwordHash: undefined })));
-    add("userMemberships", memberships);
-    add("permissionRules", permissionRules);
-    add("subscriptionPlans", subscriptionPlans);
-    add("accountSubscriptions", accountSubscription);
-    add("invoices", invoices);
-    add("appPayments", payments);
-    add("billingEvents", billingEvents);
-    add("syncDevices", syncDevices.map((d: any) => ({ ...d, deviceName: d.name || d.deviceName })));
-    add("syncConflicts", syncConflicts);
-    add("apiClients", apiClients);
-    add("webhooks", webhooks.map((w: any) => ({ ...w, secretHash: undefined, secret: undefined })));
-    add("webhookLogs", webhookLogs);
-    add("integrationMappings", integrationMappings);
-    add("auditLogs", auditLogs);
-    add("backgroundJobs", backgroundJobs);
-    add("storageUsages", storageUsages);
-    add("accountFeatureFlags", featureFlags);
-    add("accountSystemSettings", systemSettings);
-    add("notificationDeliveryLogs", notificationLogs);
+    const query = async (
+      tableName: string,
+      delegateName: string,
+      methodName: "findUnique" | "findMany",
+      args: Record<string, unknown>,
+    ) => {
+      const delegate = prisma[delegateName];
+      const method = delegate?.[methodName];
 
-    return { ok: true, records, serverTime: Date.now() };
+      if (typeof method !== "function") {
+        unavailableTables.push(tableName);
+        return;
+      }
+
+      try {
+        const result =
+          await method.call(
+            delegate,
+            args,
+          );
+
+        add(tableName, result);
+      } catch (error) {
+        unavailableTables.push(
+          tableName,
+        );
+
+        console.warn(
+          `[sync:platform-cache] ${tableName} could not be loaded.`,
+          error instanceof Error
+            ? error.message
+            : String(error),
+        );
+      }
+    };
+
+    await Promise.all([
+      query("accounts", "account", "findUnique", { where: { id: accountId } }),
+      query("appUsers", "appUser", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 1000 }),
+      query("userMemberships", "userMembership", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 2000 }),
+      query("permissionRules", "permissionRule", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" } }),
+      query("userSessions", "userSession", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 100 }),
+
+      query("commercialPlans", "commercialPlan", "findMany", { where: { active: true }, orderBy: { createdAt: "asc" } }),
+      query("subscriptionPlans", "subscriptionPlan", "findMany", { where: { active: true }, orderBy: { priceMonthly: "asc" } }),
+      query("accountSubscriptions", "accountSubscription", "findUnique", { where: { accountId }, include: { plan: true } }),
+      query("subscriptionPeriods", "subscriptionPeriod", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("subscriptionChangeOrders", "subscriptionChangeOrder", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("privateOffers", "privateOffer", "findMany", { where: { active: true }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("privateOfferAssignments", "privateOfferAssignment", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("pricingOverrides", "accountPricingOverride", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("accountUsageSnapshots", "accountUsageSnapshot", "findMany", { where: { accountId }, orderBy: { calculatedAt: "desc" }, take: 24 }),
+      query("accountEntitlements", "accountEntitlement", "findUnique", { where: { accountId } }),
+
+      query("perpetualLicenses", "perpetualLicense", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" } }),
+      query("licenseActivations", "licenseActivation", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query(
+        "licenseValidationEvents",
+        "licenseValidationEvent",
+        "findMany",
+        {
+          where: {
+            accountId,
+          },
+          orderBy: {
+            validatedAt: "desc",
+          },
+          take: 100,
+        },
+      ),
+      query("licenseUpgradeOffers", "licenseUpgradeOffer", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+
+      query("supportedLocales", "supportedLocale", "findMany", { where: { active: true }, orderBy: { code: "asc" } }),
+      query("accountLocaleSettings", "accountLocaleSetting", "findUnique", { where: { accountId } }),
+      query("userLocalePreferences", "userLocalePreference", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 1000 }),
+      query("membershipLocalePreferences", "membershipLocalePreference", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 2000 }),
+
+      query(
+        "platformReleases",
+        "platformRelease",
+        "findMany",
+        {
+          where: {
+            status: "published",
+          },
+          orderBy: [
+            {
+              publishedAt: "desc",
+            },
+            {
+              createdAt: "desc",
+            },
+          ],
+          take: 50,
+        },
+      ),
+      query("platformReleaseNotes", "platformReleaseNote", "findMany", { where: { active: true }, orderBy: { createdAt: "desc" }, take: 200 }),
+      query(
+        "platformAnnouncements",
+        "platformAnnouncement",
+        "findMany",
+        {
+          where: {
+            status: "published",
+            AND: [
+              {
+                OR: [
+                  {
+                    startsAt: null,
+                  },
+                  {
+                    startsAt: {
+                      lte: new Date(),
+                    },
+                  },
+                ],
+              },
+              {
+                OR: [
+                  {
+                    expiresAt: null,
+                  },
+                  {
+                    expiresAt: {
+                      gt: new Date(),
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          orderBy: [
+            {
+              publishedAt: "desc",
+            },
+            {
+              createdAt: "desc",
+            },
+          ],
+          take: 100,
+        },
+      ),
+
+      query("invoices", "invoice", "findMany", { where: { accountId, ...(sinceDate ? { updatedAt: { gte: sinceDate } } : {}) }, orderBy: { updatedAt: "desc" }, take: 100 }),
+      query("appPayments", "appPayment", "findMany", { where: { accountId, ...(sinceDate ? { updatedAt: { gte: sinceDate } } : {}) }, orderBy: { updatedAt: "desc" }, take: 100 }),
+      query("billingEvents", "billingEvent", "findMany", { where: { accountId, ...(sinceDate ? { createdAt: { gte: sinceDate } } : {}) }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("syncDevices", "syncDevice", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 100 }),
+      query("syncConflicts", "syncConflict", "findMany", { where: { accountId, status: { in: ["open", "resolved", "ignored"] } }, orderBy: { detectedAt: "desc" }, take: 100 }),
+      query("apiClients", "apiClient", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 100 }),
+      query("apiKeys", "apiKey", "findMany", { where: { accountId, active: true }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("webhooks", "webhook", "findMany", { where: { accountId }, orderBy: { updatedAt: "desc" }, take: 100 }),
+      query("webhookLogs", "webhookLog", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("integrationMappings", "integrationMapping", "findMany", { where: { accountId, active: true }, orderBy: { updatedAt: "desc" }, take: 500 }),
+      query("auditLogs", "auditLog", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("backgroundJobs", "backgroundJob", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+      query("storageUsages", "storageUsage", "findUnique", { where: { accountId } }),
+      query("accountFeatureFlags", "accountFeatureFlag", "findMany", { where: { accountId }, orderBy: { key: "asc" } }),
+      query("accountSystemSettings", "accountSystemSetting", "findMany", { where: { accountId }, orderBy: { key: "asc" } }),
+      query("notificationDeliveryLogs", "notificationDeliveryLog", "findMany", { where: { accountId }, orderBy: { createdAt: "desc" }, take: 100 }),
+    ]);
+
+    return {
+      ok: true,
+      records,
+      serverTime: Date.now(),
+      requestedTables: PLATFORM_CACHE_TABLE_NAMES.length,
+      returnedTables: [...new Set(records.map((record) => record.tableName))],
+      unavailableTables: [...new Set(unavailableTables)],
+    };
+  }
+
+  private sanitizePlatformCachePayload(
+    tableName: string,
+    payload: Record<string, any>,
+  ) {
+    const sanitized = { ...payload };
+
+    for (const key of [
+      "passwordHash", "secret", "secretHash", "tokenHash", "refreshTokenHash",
+      "privateKey", "apiKeyHash", "challenge", "challengeHash",
+    ]) {
+      delete sanitized[key];
+    }
+
+    if (tableName === "apiKeys") {
+      delete sanitized.key;
+      delete sanitized.rawKey;
+    }
+
+    if (tableName === "userSessions") {
+      delete sanitized.refreshToken;
+      delete sanitized.accessToken;
+    }
+
+    return sanitized;
   }
 
   async registerDevice(user: { id?: string; accountId?: string }, dto: RegisterSyncDeviceDto) {
@@ -1221,12 +994,18 @@ export class SyncService {
 
     await this.ensureAccount(accountId);
 
+    const access = await this.syncPolicy.resolve({
+      accountId,
+      role: (user as AuthUser).role,
+    });
+
     const device = await this.prisma.syncDevice.upsert({
       where: { accountId_deviceId: { accountId, deviceId } },
       update: {
         userId: dto.userId || user.id || undefined,
         name: dto.name || dto.deviceName || undefined,
         platform: dto.platform || "web",
+        syncPolicy: access.syncPolicy,
         lastSeenAt: new Date(),
         active: true,
       },
@@ -1236,6 +1015,7 @@ export class SyncService {
         deviceId,
         name: dto.name || dto.deviceName || undefined,
         platform: dto.platform || "web",
+        syncPolicy: access.syncPolicy,
         lastSeenAt: new Date(),
         active: true,
       },
@@ -1259,6 +1039,10 @@ export class SyncService {
 
   async resolveConflict(actor: AuthUser, conflictId: string, dto: ResolveSyncConflictDto) {
     const accountId = this.requireActorAccount(actor);
+    await this.syncPolicy.assertCanResolveConflicts(
+      actor,
+      accountId,
+    );
     const userId = actor.id;
     const conflict = await this.prisma.syncConflict.findUnique({ where: { id: conflictId } });
 

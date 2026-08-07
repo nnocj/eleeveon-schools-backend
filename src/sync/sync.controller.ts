@@ -1,11 +1,11 @@
 /**
- * Phase 2 note: existing synchronization behaviour is preserved here.
- * Subscription quota enforcement is introduced in the dedicated enforcement phase.
- *
  * src/sync/sync.controller.ts
  * --------------------------------------------------------------------------
- * JWT-authoritative synchronization controller with Phase 21 workspace
- * bootstrap.
+ * JWT-authoritative synchronization controller.
+ *
+ * Every data-bearing operation is policy-checked inside SyncService through
+ * SubscriptionSyncPolicyService. The request body can never override the JWT
+ * account scope.
  */
 
 import {
@@ -55,6 +55,20 @@ export class SyncController {
     );
   }
 
+  /**
+   * Resolve the server-authoritative execution policy used by runSync().
+   * The request body may contain accountId for backward compatibility, but
+   * it is deliberately ignored; JWT account scope is authoritative.
+   */
+  @Post("policy")
+  policy(
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.syncService.policy(
+      req.user,
+    );
+  }
+
   @Post("push")
   push(
     @Req() req: AuthenticatedRequest,
@@ -89,12 +103,6 @@ export class SyncController {
     );
   }
 
-  /**
-   * Fast selected-workspace bundle.
-   *
-   * The body cannot override account scope. School/branch/profile scope is
-   * checked against the authenticated user's active membership.
-   */
   @Post("workspace-bootstrap")
   workspaceBootstrap(
     @Req() req: AuthenticatedRequest,
@@ -112,6 +120,10 @@ export class SyncController {
     );
   }
 
+  /**
+   * Platform bootstrap remains available for offline/platform-only accounts so
+   * licences, entitlements, developer notices and account metadata can refresh.
+   */
   @Post("bootstrap")
   bootstrap(
     @Req() req: AuthenticatedRequest,

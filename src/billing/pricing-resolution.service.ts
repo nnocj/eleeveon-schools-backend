@@ -1,185 +1,172 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import type { SubscriptionPlan } from "@prisma/client";
+import {
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import type { SubscriptionBillingCycle } from "./types/subscription.types";
-import type { PriceResolution } from "./types/proration.types";
+import { SubscriptionCalculatorService } from "./subscription-calculator.service";
+import type { BillingCycle } from "./types/subscription.types";
 
 @Injectable()
 export class PricingResolutionService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  planPrice(plan: SubscriptionPlan, cycle: SubscriptionBillingCycle): number {
-    if (cycle === "yearly") return Number(plan.priceYearly || 0);
-    if (cycle === "termly") return Number(plan.priceTermly || 0);
-    return Number(plan.priceMonthly || 0);
-  }
-
-  private applyDiscount(
-    amount: number,
-    type?: string | null,
-    value?: number | null,
-  ): { effective: number; discountAmount: number; complimentary: boolean } {
-    if (type === "free") {
-      return { effective: 0, discountAmount: amount, complimentary: true };
-    }
-    if (type === "percentage") {
-      const percentage = Math.min(100, Math.max(0, Number(value || 0)));
-      const discountAmount = Math.round((amount * percentage) / 100);
-      return {
-        effective: Math.max(0, amount - discountAmount),
-        discountAmount,
-        complimentary: false,
-      };
-    }
-    if (type === "fixed") {
-      const discountAmount = Math.min(amount, Math.max(0, Number(value || 0)));
-      return {
-        effective: Math.max(0, amount - discountAmount),
-        discountAmount,
-        complimentary: false,
-      };
-    }
-    return { effective: amount, discountAmount: 0, complimentary: false };
-  }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly calculator: SubscriptionCalculatorService,
+  ) {}
 
   async resolve(input: {
     accountId: string;
     planId: string;
-    billingCycle: SubscriptionBillingCycle;
-    privateOfferId?: string | null;
-    pricingOverrideId?: string | null;
+    billingCycle: BillingCycle;
+    privateOfferCode?: string;
+    pricingOverrideId?: string;
     at?: Date;
-  }): Promise<{ plan: SubscriptionPlan; price: PriceResolution }> {
-    const at = input.at || new Date();
-    const plan = await this.prisma.subscriptionPlan.findFirst({
-      where: { id: input.planId, active: true },
-    });
-    if (!plan) throw new NotFoundException("Active plan not found.");
+  }) {
+    const at = input.at ?? new Date();
 
-    const publicPlanPrice = this.planPrice(plan, input.billingCycle);
+    const plan =
+      await this.prisma.subscriptionPlan.findUnique({
+        where: { id: input.planId },
+      });
 
-    const override = input.pricingOverrideId
-      ? await this.prisma.accountPricingOverride.findFirst({
-          where: {
-            id: input.pricingOverrideId,
-            accountId: input.accountId,
-            planId: plan.id,
-            active: true,
-            AND: [
-              { OR: [{ validFrom: null }, { validFrom: { lte: at } }] },
-              { OR: [{ validUntil: null }, { validUntil: { gt: at } }] },
-            ],
-          },
-        })
-      : await this.prisma.accountPricingOverride.findFirst({
-          where: {
-            accountId: input.accountId,
-            planId: plan.id,
-            active: true,
-            AND: [
-              { OR: [{ validFrom: null }, { validFrom: { lte: at } }] },
-              { OR: [{ validUntil: null }, { validUntil: { gt: at } }] },
-            ],
-          },
-          orderBy: { updatedAt: "desc" },
-        });
-
-    if (override) {
-      const configured = input.billingCycle === "yearly"
-        ? override.priceYearly
-        : input.billingCycle === "termly"
-          ? override.priceTermly
-          : override.priceMonthly;
-      const listPrice = configured == null ? publicPlanPrice : Number(configured);
-      const discount = this.applyDiscount(
-        listPrice,
-        override.discountType,
-        override.discountValue,
+    if (!plan || !plan.active) {
+      throw new NotFoundException(
+        "Subscription plan not found or inactive.",
       );
-      return {
-        plan,
-        price: {
-          source: "account_override",
-          currency: override.currency || plan.currency,
-          listPrice,
-          effectivePrice: discount.effective,
-          publicPlanPrice,
-          pricingOverrideId: override.id,
-          discountType: override.discountType as any,
-          discountValue: override.discountValue,
-          discountAmount: discount.discountAmount,
-          complimentary: discount.complimentary,
-        },
-      };
     }
 
-    const assignment = input.privateOfferId
-      ? await this.prisma.privateOfferAssignment.findFirst({
-          where: {
-            accountId: input.accountId,
-            offerId: input.privateOfferId,
-            status: { in: ["assigned", "active", "redeemed"] },
-          },
-          include: { offer: true },
-        })
-      : await this.prisma.privateOfferAssignment.findFirst({
-          where: {
-            accountId: input.accountId,
-            status: { in: ["assigned", "active", "redeemed"] },
-            offer: {
-              basePlanId: plan.id,
-              active: true,
-              AND: [
-                { OR: [{ validFrom: null }, { validFrom: { lte: at } }] },
-                { OR: [{ validUntil: null }, { validUntil: { gt: at } }] },
-              ],
-            },
-          },
-          include: { offer: true },
-          orderBy: { updatedAt: "desc" },
-        });
+    const [assignment, override] =
+      await Promise.all([
+        input.privateOfferCode
+          ? this.prisma.privateOfferAssignment.findFirst({
+              where: {
+                accountId: input.accountId,
+                status: {
+                  in: [
+                    "assigned",
+                    "active",
+                    "redeemed",
+                  ],
+                },
+                offer: {
+                  code: input.privateOfferCode,
+                  active: true,
+                  basePlanId: input.planId,
+                },
+                OR: [
+                  { validFrom: null },
+                  { validFrom: { lte: at } },
+                ],
+                AND: [
+                  {
+                    OR: [
+                      { validUntil: null },
+                      { validUntil: { gt: at } },
+                    ],
+                  },
+                ],
+              },
+              include: { offer: true },
+            })
+          : null,
+        input.pricingOverrideId
+          ? this.prisma.accountPricingOverride.findFirst({
+              where: {
+                id: input.pricingOverrideId,
+                accountId: input.accountId,
+                planId: input.planId,
+                active: true,
+              },
+            })
+          : this.prisma.accountPricingOverride.findFirst({
+              where: {
+                accountId: input.accountId,
+                planId: input.planId,
+                active: true,
+                OR: [
+                  { validFrom: null },
+                  { validFrom: { lte: at } },
+                ],
+                AND: [
+                  {
+                    OR: [
+                      { validUntil: null },
+                      { validUntil: { gt: at } },
+                    ],
+                  },
+                ],
+              },
+              orderBy: { updatedAt: "desc" },
+            }),
+      ]);
 
-    if (assignment?.offer) {
-      const offer = assignment.offer;
-      const configured = input.billingCycle === "yearly"
-        ? offer.priceYearly
-        : input.billingCycle === "termly"
-          ? offer.priceTermly
-          : offer.priceMonthly;
-      const listPrice = configured == null ? publicPlanPrice : Number(configured);
-      const discount = this.applyDiscount(
-        listPrice,
-        offer.discountType,
-        offer.discountValue,
-      );
-      return {
+    const listAmount =
+      this.calculator.priceForCycle(
         plan,
-        price: {
-          source: discount.complimentary ? "complimentary" : "private_offer",
-          currency: offer.currency || plan.currency,
-          listPrice,
-          effectivePrice: discount.effective,
-          publicPlanPrice,
-          privateOfferId: offer.id,
-          discountType: offer.discountType as any,
-          discountValue: offer.discountValue,
-          discountAmount: discount.discountAmount,
-          complimentary: discount.complimentary,
-        },
-      };
-    }
+        input.billingCycle,
+      );
+
+    const offerPrice = assignment?.offer
+      ? this.explicitPrice(
+          assignment.offer,
+          input.billingCycle,
+        )
+      : undefined;
+
+    const overridePrice = override
+      ? this.explicitPrice(
+          override,
+          input.billingCycle,
+        )
+      : undefined;
+
+    const baseAmount =
+      overridePrice ??
+      offerPrice ??
+      listAmount;
+
+    const discountSource =
+      override ?? assignment?.offer;
+
+    const discountAmount =
+      this.calculator.applyDiscount(
+        baseAmount,
+        discountSource?.discountType,
+        discountSource?.discountValue,
+      );
 
     return {
       plan,
-      price: {
-        source: "public_plan",
-        currency: plan.currency,
-        listPrice: publicPlanPrice,
-        effectivePrice: publicPlanPrice,
-        publicPlanPrice,
-        discountAmount: 0,
-        complimentary: publicPlanPrice <= 0,
-      },
+      privateOfferAssignment: assignment,
+      pricingOverride: override,
+      currency:
+        override?.currency ??
+        assignment?.offer.currency ??
+        plan.currency,
+      listAmount,
+      baseAmount,
+      discountAmount,
     };
+  }
+
+  private explicitPrice(
+    source: {
+      priceMonthly?: number | null;
+      priceTermly?: number | null;
+      priceYearly?: number | null;
+    },
+    billingCycle: BillingCycle,
+  ): number | undefined {
+    const value =
+      billingCycle === "monthly"
+        ? source.priceMonthly
+        : billingCycle === "termly"
+          ? source.priceTermly
+          : billingCycle === "yearly"
+            ? source.priceYearly
+            : undefined;
+
+    return typeof value === "number"
+      ? value
+      : undefined;
   }
 }

@@ -17,6 +17,7 @@ const SUBSCRIPTION_STATUSES = [
   "trial",
   "active",
   "pending",
+  "grace",
   "past_due",
   "expired",
   "cancelled",
@@ -28,6 +29,30 @@ const BILLING_CYCLES = [
   "termly",
   "yearly",
   "manual",
+] as const;
+
+const LICENSE_MODELS = [
+  "subscription",
+  "perpetual",
+  "trial",
+  "complimentary",
+] as const;
+
+const DEPLOYMENT_MODES = [
+  "connected",
+  "offline",
+] as const;
+
+const SYNC_POLICIES = [
+  "full",
+  "platform_only",
+  "disabled",
+] as const;
+
+const UPDATE_POLICIES = [
+  "continuous",
+  "security_only",
+  "version_locked",
 ] as const;
 
 export class CreatePlanDto {
@@ -50,9 +75,6 @@ export class CreatePlanDto {
   @Min(0)
   priceMonthly!: number;
 
-  /**
-   * Four-month subscription price.
-   */
   @Type(() => Number)
   @IsInt()
   @Min(0)
@@ -62,6 +84,70 @@ export class CreatePlanDto {
   @IsInt()
   @Min(0)
   priceYearly!: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  priceOneTime?: number;
+
+  @IsOptional()
+  @IsIn(LICENSE_MODELS)
+  licenseModel?: (typeof LICENSE_MODELS)[number];
+
+  @IsOptional()
+  @IsIn(DEPLOYMENT_MODES)
+  deploymentMode?: (typeof DEPLOYMENT_MODES)[number];
+
+  @IsOptional()
+  @IsIn(SYNC_POLICIES)
+  syncPolicy?: (typeof SYNC_POLICIES)[number];
+
+  @IsOptional()
+  @IsIn(UPDATE_POLICIES)
+  updatePolicy?: (typeof UPDATE_POLICIES)[number];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  licensedMajorVersion?: number;
+
+  @IsOptional()
+  @IsString()
+  minimumAppVersion?: string;
+
+  @IsOptional()
+  @IsString()
+  maximumAppVersion?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  deviceLimit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  activationLimit?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  requiresPeriodicValidation?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  validationIntervalDays?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offlineGraceDays?: number;
 
   @IsOptional()
   @Type(() => Number)
@@ -105,93 +191,30 @@ export class CreatePlanDto {
   @Min(0)
   maxApiCallsPerMonth?: number;
 
-  // Core platform capabilities.
-  @IsOptional()
-  @IsBoolean()
-  offlineSync?: boolean;
+  @IsOptional() @IsBoolean() offlineSync?: boolean;
+  @IsOptional() @IsBoolean() cloudBackup?: boolean;
+  @IsOptional() @IsBoolean() reports?: boolean;
+  @IsOptional() @IsBoolean() finance?: boolean;
+  @IsOptional() @IsBoolean() attendance?: boolean;
+  @IsOptional() @IsBoolean() identityCards?: boolean;
+  @IsOptional() @IsBoolean() identitySafety?: boolean;
+  @IsOptional() @IsBoolean() transport?: boolean;
+  @IsOptional() @IsBoolean() communications?: boolean;
+  @IsOptional() @IsBoolean() calendarScheduling?: boolean;
+  @IsOptional() @IsBoolean() schoolWebsites?: boolean;
+  @IsOptional() @IsBoolean() parentPortal?: boolean;
+  @IsOptional() @IsBoolean() studentPortal?: boolean;
+  @IsOptional() @IsBoolean() teacherPortal?: boolean;
+  @IsOptional() @IsBoolean() advancedAnalytics?: boolean;
+  @IsOptional() @IsBoolean() apiAccess?: boolean;
+  @IsOptional() @IsBoolean() webhooks?: boolean;
+  @IsOptional() @IsBoolean() prioritySupport?: boolean;
 
-  @IsOptional()
-  @IsBoolean()
-  cloudBackup?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  reports?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  finance?: boolean;
-
-  // Operations, identity and safety.
-  @IsOptional()
-  @IsBoolean()
-  attendance?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  identityCards?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  identitySafety?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  transport?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  communications?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  calendarScheduling?: boolean;
-
-  // Public digital presence.
-  @IsOptional()
-  @IsBoolean()
-  schoolWebsites?: boolean;
-
-  // Role portals and advanced capabilities.
-  @IsOptional()
-  @IsBoolean()
-  parentPortal?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  studentPortal?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  teacherPortal?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  advancedAnalytics?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  apiAccess?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  webhooks?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  prioritySupport?: boolean;
-
-  /**
-   * Enabled feature keys used by the extensible capability system.
-   */
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   features?: string[];
 
-  /**
-   * Extensible plan metadata, including metadata.featureFlags.
-   */
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
@@ -201,9 +224,6 @@ export class CreatePlanDto {
   active?: boolean;
 }
 
-/**
- * PATCH DTO: every CreatePlanDto property becomes optional.
- */
 export class UpdatePlanDto extends PartialType(CreatePlanDto) {}
 
 export class CreateSubscriptionDto {
@@ -221,113 +241,51 @@ export class CreateSubscriptionDto {
   @IsIn(BILLING_CYCLES)
   billingCycle?: string;
 
-  @IsOptional()
-  @IsDateString()
-  trialStartedAt?: string;
-
-  @IsOptional()
-  @IsDateString()
-  trialEndsAt?: string;
-
-  @IsOptional()
-  @IsDateString()
-  currentPeriodStart?: string;
-
-  @IsOptional()
-  @IsDateString()
-  currentPeriodEnd?: string;
-
-  @IsOptional()
-  @IsDateString()
-  nextBillingDate?: string;
+  @IsOptional() @IsDateString() trialStartedAt?: string;
+  @IsOptional() @IsDateString() trialEndsAt?: string;
+  @IsOptional() @IsDateString() currentPeriodStart?: string;
+  @IsOptional() @IsDateString() currentPeriodEnd?: string;
+  @IsOptional() @IsDateString() nextBillingDate?: string;
 }
 
-export class UpdateSubscriptionDto {
-  @IsOptional()
-  @IsString()
-  planId?: string;
-
-  @IsOptional()
-  @IsIn(SUBSCRIPTION_STATUSES)
-  status?: string;
-
-  @IsOptional()
-  @IsIn(BILLING_CYCLES)
-  billingCycle?: string;
-
-  @IsOptional()
-  @IsDateString()
-  trialStartedAt?: string;
-
-  @IsOptional()
-  @IsDateString()
-  trialEndsAt?: string;
-
-  @IsOptional()
-  @IsDateString()
-  currentPeriodStart?: string;
-
-  @IsOptional()
-  @IsDateString()
-  currentPeriodEnd?: string;
-
-  @IsOptional()
-  @IsDateString()
-  nextBillingDate?: string;
-
-  @IsOptional()
-  @IsDateString()
-  cancelledAt?: string;
-
-  @IsOptional()
-  @IsString()
-  cancelReason?: string;
+export class UpdateSubscriptionDto extends PartialType(
+  CreateSubscriptionDto,
+) {
+  @IsOptional() @IsDateString() cancelledAt?: string;
+  @IsOptional() @IsString() cancelReason?: string;
 }
 
 export class CreateInvoiceDto {
   @IsString()
   accountId!: string;
 
-  @IsOptional()
-  @IsString()
-  subscriptionId?: string;
-
-  @IsOptional()
-  @IsString()
-  invoiceNumber?: string;
-
-  @IsOptional()
-  @IsString()
-  currency?: string;
+  @IsOptional() @IsString() subscriptionId?: string;
+  @IsOptional() @IsString() perpetualLicenseId?: string;
+  @IsOptional() @IsString() invoiceNumber?: string;
+  @IsOptional() @IsString() currency?: string;
 
   @Type(() => Number)
   @IsInt()
   @Min(0)
   subtotal!: number;
 
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  discount?: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) discount?: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) tax?: number;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  tax?: number;
-
-  @IsOptional()
-  @IsIn(["draft", "issued", "paid", "void", "overdue"])
+  @IsIn([
+    "draft",
+    "issued",
+    "part_paid",
+    "paid",
+    "void",
+    "overdue",
+    "cancelled",
+  ])
   status?: string;
 
-  @IsOptional()
-  @IsDateString()
-  dueDate?: string;
-
-  @IsOptional()
-  @IsString()
-  note?: string;
+  @IsOptional() @IsDateString() dueDate?: string;
+  @IsOptional() @IsString() note?: string;
 }
 
 export class UpdateInvoiceDto extends PartialType(CreateInvoiceDto) {}
@@ -336,22 +294,16 @@ export class CreatePaymentDto {
   @IsString()
   accountId!: string;
 
-  @IsOptional()
-  @IsString()
-  subscriptionId?: string;
-
-  @IsOptional()
-  @IsString()
-  invoiceId?: string;
+  @IsOptional() @IsString() subscriptionId?: string;
+  @IsOptional() @IsString() perpetualLicenseId?: string;
+  @IsOptional() @IsString() invoiceId?: string;
 
   @Type(() => Number)
   @IsInt()
   @Min(1)
   amount!: number;
 
-  @IsOptional()
-  @IsString()
-  currency?: string;
+  @IsOptional() @IsString() currency?: string;
 
   @IsIn(["momo", "card", "bank", "cash", "manual"])
   method!: string;
@@ -361,40 +313,28 @@ export class CreatePaymentDto {
   provider?: string;
 
   @IsOptional()
-  @IsIn(["pending", "paid", "failed", "refunded", "cancelled"])
+  @IsIn([
+    "pending",
+    "processing",
+    "paid",
+    "failed",
+    "refunded",
+    "cancelled",
+  ])
   status?: string;
 
-  @IsOptional()
-  @IsString()
-  providerReference?: string;
-
-  @IsOptional()
-  @IsString()
-  receiptNumber?: string;
-
-  @IsOptional()
-  @IsString()
-  payerName?: string;
-
-  @IsOptional()
-  @IsString()
-  payerPhone?: string;
-
-  @IsOptional()
-  @IsEmail()
-  payerEmail?: string;
+  @IsOptional() @IsString() providerReference?: string;
+  @IsOptional() @IsString() receiptNumber?: string;
+  @IsOptional() @IsString() payerName?: string;
+  @IsOptional() @IsString() payerPhone?: string;
+  @IsOptional() @IsEmail() payerEmail?: string;
 
   @IsOptional()
   @IsIn(["mtn", "telecel", "airteltigo"])
   momoNetwork?: string;
 
-  @IsOptional()
-  @IsDateString()
-  paidAt?: string;
-
-  @IsOptional()
-  @IsString()
-  note?: string;
+  @IsOptional() @IsDateString() paidAt?: string;
+  @IsOptional() @IsString() note?: string;
 }
 
 export class UpdatePaymentDto extends PartialType(CreatePaymentDto) {}

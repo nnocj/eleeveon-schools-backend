@@ -1,6 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
-
+import { EntitlementsModule } from "./entitlements";
 import { AccountsModule } from "./accounts/accounts.module";
 import { AuthModule } from "./auth/auth.module";
 import { BillingModule } from "./billing/billing.module";
@@ -21,6 +21,7 @@ import { SyncModule } from "./sync/sync.module";
       isGlobal: true,
     }),
 
+    EntitlementsModule,
     PrismaModule,
     RealtimeModule,
     AuthModule,
