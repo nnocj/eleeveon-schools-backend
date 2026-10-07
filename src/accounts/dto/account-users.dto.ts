@@ -36,6 +36,9 @@ export class UpdateAccountDto {
   @IsString()
   name?: string;
 
+  // Kept for backward compatibility with existing account-management callers.
+  // The owner Account Profile uses /accounts/me/email for owner email changes so
+  // Account.email and the owner's AppUser.email stay synchronized.
   @IsOptional()
   @IsEmail()
   email?: string;
@@ -55,6 +58,11 @@ export class UpdateAccountDto {
   @IsOptional()
   @IsIn(["active", "suspended", "closed"])
   status?: string;
+
+  // ======================================================
+  // ACCOUNT PROFILE / BRANDING
+  // These fields already exist on Prisma Account.
+  // ======================================================
 
   @IsOptional()
   @IsString()
@@ -168,6 +176,17 @@ export class UpdateAccountUserStatusDto {
   active!: boolean;
 }
 
+// ======================================================
+// CURRENT LOGGED-IN USER SELF-SERVICE
+//
+// The owner exists in two places by design:
+// - Account = top-level owner/customer account record
+// - AppUser = the owner's authenticated login identity
+//
+// Owner phone/email synchronization is handled in AccountsService.
+// These DTOs do not replace the existing administrative user DTOs.
+// ======================================================
+
 export class UpdateMyProfileDto {
   @IsOptional()
   @IsString()
@@ -201,6 +220,13 @@ export class ChangeMyPasswordDto {
   @MinLength(6)
   newPassword!: string;
 }
+
+// ======================================================
+// ACCOUNT SYSTEM SETTINGS
+//
+// Country, currency, defaultLocale and timeZone remain first-class Account
+// columns. Operational preferences below use AccountSystemSetting.
+// ======================================================
 
 export class UpdateAccountSettingsDto {
   @IsOptional()
