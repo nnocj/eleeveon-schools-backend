@@ -17,11 +17,15 @@ import { Roles } from "../common/roles.decorator";
 
 import { AccountsService } from "./accounts.service";
 import {
+  ChangeMyEmailDto,
+  ChangeMyPasswordDto,
   CreateAccountDto,
   CreateAccountUserDto,
   UpdateAccountDto,
+  UpdateAccountSettingsDto,
   UpdateAccountUserDto,
   UpdateAccountUserStatusDto,
+  UpdateMyProfileDto,
 } from "./dto/account-users.dto";
 
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -37,6 +41,86 @@ export class AccountsController {
   @Get("me")
   me(@Req() req: any) {
     return this.accountsService.getAccount(req.user);
+  }
+
+  @Roles(
+    "developer",
+    "platform_team",
+    "owner",
+    "super_admin",
+  )
+  @Patch("me")
+  updateMyAccount(
+    @Req() req: any,
+    @Body() dto: UpdateAccountDto,
+  ) {
+    return this.accountsService.updateAccount(
+      req.user,
+      req.user.accountId,
+      dto,
+    );
+  }
+
+  @Get("me/profile")
+  getMyProfile(@Req() req: any) {
+    return this.accountsService.getMyProfile(req.user);
+  }
+
+  @Patch("me/profile")
+  updateMyProfile(
+    @Req() req: any,
+    @Body() dto: UpdateMyProfileDto,
+  ) {
+    return this.accountsService.updateMyProfile(
+      req.user,
+      dto,
+    );
+  }
+
+  @Patch("me/email")
+  changeMyEmail(
+    @Req() req: any,
+    @Body() dto: ChangeMyEmailDto,
+  ) {
+    return this.accountsService.changeMyEmail(
+      req.user,
+      dto,
+    );
+  }
+
+  @Patch("me/password")
+  changeMyPassword(
+    @Req() req: any,
+    @Body() dto: ChangeMyPasswordDto,
+  ) {
+    return this.accountsService.changeMyPassword(
+      req.user,
+      dto,
+    );
+  }
+
+  @Get("me/settings")
+  getMySettings(@Req() req: any) {
+    return this.accountsService.getAccountSettings(
+      req.user,
+    );
+  }
+
+  @Roles(
+    "developer",
+    "platform_team",
+    "owner",
+    "super_admin",
+  )
+  @Patch("me/settings")
+  updateMySettings(
+    @Req() req: any,
+    @Body() dto: UpdateAccountSettingsDto,
+  ) {
+    return this.accountsService.updateAccountSettings(
+      req.user,
+      dto,
+    );
   }
 
   @Get("me/users")
@@ -103,14 +187,6 @@ export class AccountsController {
     );
   }
 
-  // ======================================================
-  // ACCOUNT-LEVEL USER MANAGEMENT
-  //
-  // Branch Admins create lower-role users through POST /accounts/me/users
-  // and manage access through /memberships. They must not mutate or delete
-  // the global AppUser record.
-  // ======================================================
-
   @Roles(
     "developer",
     "platform_team",
@@ -162,10 +238,6 @@ export class AccountsController {
     return this.accountsService.deleteUser(req.user, id);
   }
 
-  // ======================================================
-  // OWNER SCHOOL / BRANCH RECORDS
-  // ======================================================
-
   @Patch("schools/:id")
   async updateSchool(
     @Req() req: any,
@@ -214,10 +286,6 @@ export class AccountsController {
     );
   }
 
-  // ======================================================
-  // DEVELOPER ACCOUNT MANAGEMENT
-  // ======================================================
-
   @Roles("developer")
   @Get()
   listAccounts(
@@ -235,11 +303,6 @@ export class AccountsController {
   ) {
     return this.accountsService.createAccount(req.user, dto);
   }
-
-  // ======================================================
-  // EXPLICIT ACCOUNT ROUTES
-  // Keep dynamic ":accountId" routes last.
-  // ======================================================
 
   @Get(":accountId/users")
   getUsers(
