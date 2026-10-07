@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import * as bcrypt from "bcryptjs";
 import { PrismaService } from "../prisma/prisma.service";
 import { RealtimeEventsService } from "../realtime/realtime-events.service";
@@ -119,15 +119,31 @@ export class AccountsService {
     }
   }
 
+  private isOwnerLevelRole(role: string): boolean {
+    return OWNER_ONLY_ROLES.has(this.normalizedActorRole(role));
+  }
+
   private assertCanManageOwnerOnly(role: string) {
-    if (!OWNER_ONLY_ROLES.has(role)) {
+    if (!this.isOwnerLevelRole(role)) {
       throw new ForbiddenException("Only the owner can perform this action.");
     }
   }
 
-  async getMyProfile(actor: AuthUser) {
-    const user = await this.prisma.appUser.findUnique({
-      where: { id: actor.id },
+  // ======================================================
+  // CURRENT LOGGED-IN USER / OWNER SELF-SERVICE
+  //
+  // Eleeveon owner identity intentionally spans two records:
+  // - Account = owner/customer/tenant record
+  // - AppUser = authenticated owner login
+  //
+  // Account.name remains the account/business name while AppUser.fullName is
+  // the human owner's name. For owner-level users, email and phone are kept in
+  // sync across Account and AppUser. Password remains AppUser-only.
+  // ======================================================
+
+  private async getSafeUser(userId: string) {
+    return this.prisma.appUser.findUnique({
+      where: { id: userId },
       select: {
         id: true,
         accountId: true,
@@ -143,14 +159,16 @@ export class AccountsService {
         lastLoginAt: true,
         createdAt: true,
         updatedAt: true,
-        memberships: { orderBy: { createdAt: "asc" } },
+        memberships: {
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
-    if (!user) throw new NotFoundException("Current user not found.");
-    assertSameAccountOrDeveloper(actor, user.accountId);
+  }
 
-    const account = await this.prisma.account.findUnique({
-      where: { id: user.accountId },
+  private async getOwnerAccount(accountId: string) {
+    return this.prisma.account.findUnique({
+      where: { id: accountId },
       select: {
         id: true,
         name: true,
@@ -171,140 +189,298 @@ export class AccountsService {
         updatedAt: true,
       },
     });
+  }
+
+  async getMyProfile(actor: AuthUser) {
+    const user = await this.getSafeUser(actor.id);
+    if (!user) throw new NotFoundException("Current user not found.");
+
+    assertSameAccountOrDeveloper(actor, user.accountId);
+
+    const account = await this.getOwnerAccount(user.accountId);
     if (!account) throw new NotFoundException("Account not found.");
-    return { user, account };
+
+    const ownerLevel = this.isOwnerLevelRole(actor.role);
+    const accountEmail = account.email?.toLowerCase().trim() || "";
+    const userEmail = user.email?.toLowerCase().trim() || "";
+    const accountPhone = account.phone?.trim() || "";
+    const userPhone = user.phone?.trim() || "";
+
+    return {
+      user,
+      account,
+      ownerIdentity: {
+        ownerLevel,
+        emailSynchronized:
+          !ownerLevel || (!accountEmail && !userEmail) || accountEmail === userEmail,
+        phoneSynchronized:
+          !ownerLevel || (!accountPhone && !userPhone) || accountPhone === userPhone,
+      },
+    };
   }
 
   async updateMyProfile(actor: AuthUser, dto: UpdateMyProfileDto) {
     const existing = await this.prisma.appUser.findUnique({
       where: { id: actor.id },
-      select: { id: true, accountId: true, active: true },
-    });
-    if (!existing) throw new NotFoundException("Current user not found.");
-    assertSameAccountOrDeveloper(actor, existing.accountId);
-
-    const user = await this.prisma.appUser.update({
-      where: { id: existing.id },
-      data: {
-        fullName: dto.fullName !== undefined ? dto.fullName.trim() : undefined,
-        phone: dto.phone !== undefined ? dto.phone.trim() || null : undefined,
-        preferredLocale: dto.preferredLocale !== undefined ? dto.preferredLocale.trim() || null : undefined,
-      },
       select: {
         id: true,
         accountId: true,
-        fullName: true,
-        email: true,
-        phone: true,
         role: true,
-        preferredLocale: true,
         active: true,
-        emailVerifiedAt: true,
-        phoneVerifiedAt: true,
-        passwordChangedAt: true,
-        lastLoginAt: true,
-        createdAt: true,
-        updatedAt: true,
-        memberships: true,
       },
     });
 
-    this.realtime.emitMembershipsChanged({
-      accountId: user.accountId,
-      userId: user.id,
-      action: "updated",
-      active: user.active !== false,
-      metadata: { operation: "self-profile-updated" },
-    });
-    return user;
-  }
-
-  async changeMyEmail(actor: AuthUser, dto: ChangeMyEmailDto) {
-    const existing = await this.prisma.appUser.findUnique({ where: { id: actor.id } });
     if (!existing) throw new NotFoundException("Current user not found.");
     assertSameAccountOrDeveloper(actor, existing.accountId);
 
-    const passwordMatches = await bcrypt.compare(dto.currentPassword, existing.passwordHash);
-    if (!passwordMatches) throw new BadRequestException("Current password is incorrect.");
+    const ownerLevel = this.isOwnerLevelRole(actor.role);
+    const normalizedPhone =
+      dto.phone !== undefined ? dto.phone.trim() || null : undefined;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.appUser.update({
+        where: { id: existing.id },
+        data: {
+          fullName:
+            dto.fullName !== undefined
+              ? dto.fullName.trim()
+              : undefined,
+          phone: normalizedPhone,
+          preferredLocale:
+            dto.preferredLocale !== undefined
+              ? dto.preferredLocale.trim() || null
+              : undefined,
+        },
+      });
+
+      // For the owner, Account.phone and owner AppUser.phone describe the same
+      // owner/customer identity, so keep them synchronized.
+      if (ownerLevel && dto.phone !== undefined) {
+        await tx.account.update({
+          where: { id: existing.accountId },
+          data: { phone: normalizedPhone },
+        });
+      }
+    });
+
+    const [user, account] = await Promise.all([
+      this.getSafeUser(existing.id),
+      this.getOwnerAccount(existing.accountId),
+    ]);
+
+    if (!user || !account) {
+      throw new NotFoundException("Owner profile could not be reloaded.");
+    }
+
+    this.realtime.emitMembershipsChanged({
+      accountId: existing.accountId,
+      userId: user.id,
+      action: "updated",
+      active: user.active !== false,
+      metadata: {
+        operation: ownerLevel
+          ? "owner-profile-updated"
+          : "self-profile-updated",
+      },
+    });
+
+    if (ownerLevel && dto.phone !== undefined) {
+      this.realtime.emitAccountDataChanged({
+        accountId: existing.accountId,
+        changedTables: ["accounts"],
+        metadata: { action: "owner-contact-updated" },
+      });
+    }
+
+    return { user, account };
+  }
+
+  async changeMyEmail(actor: AuthUser, dto: ChangeMyEmailDto) {
+    const existing = await this.prisma.appUser.findUnique({
+      where: { id: actor.id },
+    });
+
+    if (!existing) throw new NotFoundException("Current user not found.");
+    assertSameAccountOrDeveloper(actor, existing.accountId);
+
+    const passwordMatches = await bcrypt.compare(
+      dto.currentPassword,
+      existing.passwordHash,
+    );
+
+    if (!passwordMatches) {
+      throw new BadRequestException("Current password is incorrect.");
+    }
 
     const newEmail = dto.newEmail.toLowerCase().trim();
     if (!newEmail) throw new BadRequestException("New email is required.");
 
-    const duplicate = await this.prisma.appUser.findUnique({
-      where: { email: newEmail },
-      select: { id: true },
+    const ownerLevel = this.isOwnerLevelRole(actor.role);
+    const account = await this.prisma.account.findUnique({
+      where: { id: existing.accountId },
+      select: { id: true, email: true },
     });
-    if (duplicate && duplicate.id !== existing.id) {
-      throw new BadRequestException("This email is already registered.");
-    }
 
-    if (newEmail === existing.email.toLowerCase()) {
-      return this.prisma.appUser.findUnique({
-        where: { id: existing.id },
-        select: {
-          id: true,
-          accountId: true,
-          fullName: true,
-          email: true,
-          phone: true,
-          role: true,
-          preferredLocale: true,
-          active: true,
-          emailVerifiedAt: true,
-          phoneVerifiedAt: true,
-          passwordChangedAt: true,
-          lastLoginAt: true,
-          createdAt: true,
-          updatedAt: true,
-          memberships: true,
-        },
+    if (!account) throw new NotFoundException("Account not found.");
+
+    // For an owner email, Account is the first owner/customer identity boundary.
+    // A school/branch SyncRecord email is intentionally NOT checked here because
+    // contact data inside school/branch records is not a registered login identity.
+    if (ownerLevel) {
+      const accountWithEmail = await this.prisma.account.findUnique({
+        where: { email: newEmail },
+        select: { id: true },
       });
+
+      if (accountWithEmail && accountWithEmail.id !== existing.accountId) {
+        throw new ConflictException({
+          code: "OWNER_EMAIL_IN_USE_BY_ANOTHER_ACCOUNT",
+          message: "This email already belongs to another owner account.",
+        });
+      }
     }
 
-    const user = await this.prisma.appUser.update({
-      where: { id: existing.id },
-      data: { email: newEmail, emailVerifiedAt: null },
+    const userWithEmail = await this.prisma.appUser.findUnique({
+      where: { email: newEmail },
       select: {
         id: true,
         accountId: true,
         fullName: true,
         email: true,
-        phone: true,
         role: true,
-        preferredLocale: true,
         active: true,
-        emailVerifiedAt: true,
-        phoneVerifiedAt: true,
-        passwordChangedAt: true,
-        lastLoginAt: true,
-        createdAt: true,
-        updatedAt: true,
-        memberships: true,
       },
     });
 
+    if (userWithEmail && userWithEmail.id !== existing.id) {
+      if (ownerLevel && userWithEmail.accountId === existing.accountId) {
+        throw new ConflictException({
+          code: "OWNER_EMAIL_BELONGS_TO_EXISTING_ACCOUNT_USER",
+          message:
+            "This email already belongs to another user in this account. If that user is actually the owner, ownership must be transferred to that existing user instead of creating a duplicate login identity.",
+          existingUser: {
+            id: userWithEmail.id,
+            fullName: userWithEmail.fullName,
+            email: userWithEmail.email,
+            role: userWithEmail.role,
+            active: userWithEmail.active,
+          },
+        });
+      }
+
+      throw new ConflictException({
+        code: "EMAIL_ALREADY_REGISTERED_TO_ANOTHER_USER",
+        message: "This email is already registered to another login user.",
+      });
+    }
+
+    const appUserAlreadyMatches =
+      existing.email.toLowerCase().trim() === newEmail;
+    const accountAlreadyMatches =
+      (account.email || "").toLowerCase().trim() === newEmail;
+
+    if (ownerLevel) {
+      if (!appUserAlreadyMatches || !accountAlreadyMatches) {
+        await this.prisma.$transaction(async (tx) => {
+          if (!appUserAlreadyMatches) {
+            await tx.appUser.update({
+              where: { id: existing.id },
+              data: {
+                email: newEmail,
+                emailVerifiedAt: null,
+              },
+            });
+          }
+
+          if (!accountAlreadyMatches) {
+            await tx.account.update({
+              where: { id: existing.accountId },
+              data: { email: newEmail },
+            });
+          }
+        });
+      }
+    } else if (!appUserAlreadyMatches) {
+      await this.prisma.appUser.update({
+        where: { id: existing.id },
+        data: {
+          email: newEmail,
+          emailVerifiedAt: null,
+        },
+      });
+    }
+
+    const [user, updatedAccount] = await Promise.all([
+      this.getSafeUser(existing.id),
+      this.getOwnerAccount(existing.accountId),
+    ]);
+
+    if (!user || !updatedAccount) {
+      throw new NotFoundException("Updated owner profile could not be reloaded.");
+    }
+
     this.realtime.emitMembershipsChanged({
-      accountId: user.accountId,
+      accountId: existing.accountId,
       userId: user.id,
       action: "updated",
       active: user.active !== false,
-      metadata: { operation: "self-email-changed" },
+      metadata: {
+        operation: ownerLevel
+          ? "owner-email-synchronized"
+          : "self-email-changed",
+      },
     });
-    return user;
+
+    if (ownerLevel) {
+      this.realtime.emitAccountDataChanged({
+        accountId: existing.accountId,
+        changedTables: ["accounts"],
+        metadata: { action: "owner-email-synchronized" },
+      });
+    }
+
+    return {
+      user,
+      account: updatedAccount,
+      ownerIdentity: {
+        ownerLevel,
+        emailSynchronized:
+          updatedAccount.email?.toLowerCase().trim() ===
+          user.email?.toLowerCase().trim(),
+      },
+    };
   }
 
   async changeMyPassword(actor: AuthUser, dto: ChangeMyPasswordDto) {
-    const existing = await this.prisma.appUser.findUnique({ where: { id: actor.id } });
+    const existing = await this.prisma.appUser.findUnique({
+      where: { id: actor.id },
+    });
+
     if (!existing) throw new NotFoundException("Current user not found.");
     assertSameAccountOrDeveloper(actor, existing.accountId);
 
-    const passwordMatches = await bcrypt.compare(dto.currentPassword, existing.passwordHash);
-    if (!passwordMatches) throw new BadRequestException("Current password is incorrect.");
+    const passwordMatches = await bcrypt.compare(
+      dto.currentPassword,
+      existing.passwordHash,
+    );
 
-    const sameAsCurrent = await bcrypt.compare(dto.newPassword, existing.passwordHash);
-    if (sameAsCurrent) throw new BadRequestException("New password must be different from the current password.");
+    if (!passwordMatches) {
+      throw new BadRequestException("Current password is incorrect.");
+    }
+
+    const sameAsCurrent = await bcrypt.compare(
+      dto.newPassword,
+      existing.passwordHash,
+    );
+
+    if (sameAsCurrent) {
+      throw new BadRequestException(
+        "New password must be different from the current password.",
+      );
+    }
 
     const passwordHash = await bcrypt.hash(dto.newPassword, 12);
+
     const user = await this.prisma.appUser.update({
       where: { id: existing.id },
       data: {
@@ -333,11 +509,16 @@ export class AccountsService {
     };
   }
 
+  // ======================================================
+  // ACCOUNT SYSTEM SETTINGS
+  // ======================================================
+
   async getAccountSettings(actor: AuthUser) {
     const account = await this.prisma.account.findUnique({
       where: { id: actor.accountId },
       select: { id: true },
     });
+
     if (!account) throw new NotFoundException("Account not found.");
 
     return this.prisma.accountSystemSetting.findMany({
@@ -346,12 +527,20 @@ export class AccountsService {
     });
   }
 
-  async updateAccountSettings(actor: AuthUser, dto: UpdateAccountSettingsDto) {
+  async updateAccountSettings(
+    actor: AuthUser,
+    dto: UpdateAccountSettingsDto,
+  ) {
     this.assertCanManageOwnerOnly(actor.role);
-    const entries = Object.entries(dto).filter(([, value]) => value !== undefined);
+
+    const entries = Object.entries(dto).filter(
+      ([, value]) => value !== undefined,
+    );
+
     if (!entries.length) return this.getAccountSettings(actor);
 
     const keys = entries.map(([key]) => key);
+
     const locked = await this.prisma.accountSystemSetting.findMany({
       where: {
         accountId: actor.accountId,
@@ -360,9 +549,12 @@ export class AccountsService {
       },
       select: { key: true },
     });
+
     if (locked.length) {
       throw new BadRequestException(
-        `These account settings are locked: ${locked.map((row) => row.key).join(", ")}.`,
+        `These account settings are locked: ${locked
+          .map((row) => row.key)
+          .join(", ")}.`,
       );
     }
 
@@ -370,10 +562,17 @@ export class AccountsService {
       entries.map(([key, value]) =>
         this.prisma.accountSystemSetting.upsert({
           where: {
-            accountId_key: { accountId: actor.accountId, key },
+            accountId_key: {
+              accountId: actor.accountId,
+              key,
+            },
           },
           update: { value: value as any },
-          create: { accountId: actor.accountId, key, value: value as any },
+          create: {
+            accountId: actor.accountId,
+            key,
+            value: value as any,
+          },
         }),
       ),
     );
@@ -381,8 +580,12 @@ export class AccountsService {
     this.realtime.emitAccountDataChanged({
       accountId: actor.accountId,
       changedTables: ["accountSystemSettings"],
-      metadata: { action: "account-settings-updated", keys },
+      metadata: {
+        action: "account-settings-updated",
+        keys,
+      },
     });
+
     return this.getAccountSettings(actor);
   }
 
