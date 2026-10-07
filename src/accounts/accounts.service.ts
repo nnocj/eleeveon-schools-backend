@@ -166,7 +166,7 @@ export class AccountsService {
   private getHighestRemainingNonOwnerRole(
     memberships: Array<{ role: string; active?: boolean; status?: string }>,
   ): string | null {
-    const activeRoles = new Set(
+    const activeRoles = new Set<string>(
       memberships
         .filter(
           (membership) =>
