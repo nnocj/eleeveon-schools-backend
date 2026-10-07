@@ -5,7 +5,17 @@ import { RealtimeEventsService } from "../realtime/realtime-events.service";
 import { AuthUser } from "../common/auth-user";
 import { assertSameAccountOrDeveloper } from "../common/scope";
 import { isDeveloper, normalizeRole } from "../common/roles";
-import { CreateAccountDto, CreateAccountUserDto, UpdateAccountDto, UpdateAccountUserDto, UpdateAccountUserStatusDto } from "./dto/account-users.dto";
+import {
+  ChangeMyEmailDto,
+  ChangeMyPasswordDto,
+  CreateAccountDto,
+  CreateAccountUserDto,
+  UpdateAccountDto,
+  UpdateAccountSettingsDto,
+  UpdateAccountUserDto,
+  UpdateAccountUserStatusDto,
+  UpdateMyProfileDto,
+} from "./dto/account-users.dto";
 
 const USER_CREATION_ROLES = new Set([
   "developer",
@@ -113,6 +123,267 @@ export class AccountsService {
     if (!OWNER_ONLY_ROLES.has(role)) {
       throw new ForbiddenException("Only the owner can perform this action.");
     }
+  }
+
+  async getMyProfile(actor: AuthUser) {
+    const user = await this.prisma.appUser.findUnique({
+      where: { id: actor.id },
+      select: {
+        id: true,
+        accountId: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        role: true,
+        preferredLocale: true,
+        active: true,
+        emailVerifiedAt: true,
+        phoneVerifiedAt: true,
+        passwordChangedAt: true,
+        lastLoginAt: true,
+        createdAt: true,
+        updatedAt: true,
+        memberships: { orderBy: { createdAt: "asc" } },
+      },
+    });
+    if (!user) throw new NotFoundException("Current user not found.");
+    assertSameAccountOrDeveloper(actor, user.accountId);
+
+    const account = await this.prisma.account.findUnique({
+      where: { id: user.accountId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        website: true,
+        address: true,
+        description: true,
+        logoMediaId: true,
+        photoMediaId: true,
+        bannerMediaId: true,
+        country: true,
+        currency: true,
+        defaultLocale: true,
+        timeZone: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    if (!account) throw new NotFoundException("Account not found.");
+    return { user, account };
+  }
+
+  async updateMyProfile(actor: AuthUser, dto: UpdateMyProfileDto) {
+    const existing = await this.prisma.appUser.findUnique({
+      where: { id: actor.id },
+      select: { id: true, accountId: true, active: true },
+    });
+    if (!existing) throw new NotFoundException("Current user not found.");
+    assertSameAccountOrDeveloper(actor, existing.accountId);
+
+    const user = await this.prisma.appUser.update({
+      where: { id: existing.id },
+      data: {
+        fullName: dto.fullName !== undefined ? dto.fullName.trim() : undefined,
+        phone: dto.phone !== undefined ? dto.phone.trim() || null : undefined,
+        preferredLocale: dto.preferredLocale !== undefined ? dto.preferredLocale.trim() || null : undefined,
+      },
+      select: {
+        id: true,
+        accountId: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        role: true,
+        preferredLocale: true,
+        active: true,
+        emailVerifiedAt: true,
+        phoneVerifiedAt: true,
+        passwordChangedAt: true,
+        lastLoginAt: true,
+        createdAt: true,
+        updatedAt: true,
+        memberships: true,
+      },
+    });
+
+    this.realtime.emitMembershipsChanged({
+      accountId: user.accountId,
+      userId: user.id,
+      action: "updated",
+      active: user.active !== false,
+      metadata: { operation: "self-profile-updated" },
+    });
+    return user;
+  }
+
+  async changeMyEmail(actor: AuthUser, dto: ChangeMyEmailDto) {
+    const existing = await this.prisma.appUser.findUnique({ where: { id: actor.id } });
+    if (!existing) throw new NotFoundException("Current user not found.");
+    assertSameAccountOrDeveloper(actor, existing.accountId);
+
+    const passwordMatches = await bcrypt.compare(dto.currentPassword, existing.passwordHash);
+    if (!passwordMatches) throw new BadRequestException("Current password is incorrect.");
+
+    const newEmail = dto.newEmail.toLowerCase().trim();
+    if (!newEmail) throw new BadRequestException("New email is required.");
+
+    const duplicate = await this.prisma.appUser.findUnique({
+      where: { email: newEmail },
+      select: { id: true },
+    });
+    if (duplicate && duplicate.id !== existing.id) {
+      throw new BadRequestException("This email is already registered.");
+    }
+
+    if (newEmail === existing.email.toLowerCase()) {
+      return this.prisma.appUser.findUnique({
+        where: { id: existing.id },
+        select: {
+          id: true,
+          accountId: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          role: true,
+          preferredLocale: true,
+          active: true,
+          emailVerifiedAt: true,
+          phoneVerifiedAt: true,
+          passwordChangedAt: true,
+          lastLoginAt: true,
+          createdAt: true,
+          updatedAt: true,
+          memberships: true,
+        },
+      });
+    }
+
+    const user = await this.prisma.appUser.update({
+      where: { id: existing.id },
+      data: { email: newEmail, emailVerifiedAt: null },
+      select: {
+        id: true,
+        accountId: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        role: true,
+        preferredLocale: true,
+        active: true,
+        emailVerifiedAt: true,
+        phoneVerifiedAt: true,
+        passwordChangedAt: true,
+        lastLoginAt: true,
+        createdAt: true,
+        updatedAt: true,
+        memberships: true,
+      },
+    });
+
+    this.realtime.emitMembershipsChanged({
+      accountId: user.accountId,
+      userId: user.id,
+      action: "updated",
+      active: user.active !== false,
+      metadata: { operation: "self-email-changed" },
+    });
+    return user;
+  }
+
+  async changeMyPassword(actor: AuthUser, dto: ChangeMyPasswordDto) {
+    const existing = await this.prisma.appUser.findUnique({ where: { id: actor.id } });
+    if (!existing) throw new NotFoundException("Current user not found.");
+    assertSameAccountOrDeveloper(actor, existing.accountId);
+
+    const passwordMatches = await bcrypt.compare(dto.currentPassword, existing.passwordHash);
+    if (!passwordMatches) throw new BadRequestException("Current password is incorrect.");
+
+    const sameAsCurrent = await bcrypt.compare(dto.newPassword, existing.passwordHash);
+    if (sameAsCurrent) throw new BadRequestException("New password must be different from the current password.");
+
+    const passwordHash = await bcrypt.hash(dto.newPassword, 12);
+    const user = await this.prisma.appUser.update({
+      where: { id: existing.id },
+      data: {
+        passwordHash,
+        passwordChangedAt: new Date(),
+        failedLoginCount: 0,
+        lockedUntil: null,
+      },
+      select: {
+        id: true,
+        accountId: true,
+        email: true,
+        role: true,
+        active: true,
+        passwordChangedAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return {
+      success: true,
+      userId: user.id,
+      email: user.email,
+      passwordChangedAt: user.passwordChangedAt,
+      updatedAt: user.updatedAt,
+    };
+  }
+
+  async getAccountSettings(actor: AuthUser) {
+    const account = await this.prisma.account.findUnique({
+      where: { id: actor.accountId },
+      select: { id: true },
+    });
+    if (!account) throw new NotFoundException("Account not found.");
+
+    return this.prisma.accountSystemSetting.findMany({
+      where: { accountId: actor.accountId },
+      orderBy: { key: "asc" },
+    });
+  }
+
+  async updateAccountSettings(actor: AuthUser, dto: UpdateAccountSettingsDto) {
+    this.assertCanManageOwnerOnly(actor.role);
+    const entries = Object.entries(dto).filter(([, value]) => value !== undefined);
+    if (!entries.length) return this.getAccountSettings(actor);
+
+    const keys = entries.map(([key]) => key);
+    const locked = await this.prisma.accountSystemSetting.findMany({
+      where: {
+        accountId: actor.accountId,
+        key: { in: keys },
+        locked: true,
+      },
+      select: { key: true },
+    });
+    if (locked.length) {
+      throw new BadRequestException(
+        `These account settings are locked: ${locked.map((row) => row.key).join(", ")}.`,
+      );
+    }
+
+    await this.prisma.$transaction(
+      entries.map(([key, value]) =>
+        this.prisma.accountSystemSetting.upsert({
+          where: {
+            accountId_key: { accountId: actor.accountId, key },
+          },
+          update: { value: value as any },
+          create: { accountId: actor.accountId, key, value: value as any },
+        }),
+      ),
+    );
+
+    this.realtime.emitAccountDataChanged({
+      accountId: actor.accountId,
+      changedTables: ["accountSystemSettings"],
+      metadata: { action: "account-settings-updated", keys },
+    });
+    return this.getAccountSettings(actor);
   }
 
   async listAccounts(actor: AuthUser, q?: string) {
