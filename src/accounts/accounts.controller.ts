@@ -23,6 +23,7 @@ import {
   CreateAccountUserDto,
   UpdateAccountDto,
   UpdateAccountSettingsDto,
+  TransferOwnershipDto,
   UpdateAccountUserDto,
   UpdateAccountUserStatusDto,
   UpdateMyProfileDto,
@@ -100,6 +101,22 @@ export class AccountsController {
     @Body() dto: ChangeMyPasswordDto,
   ) {
     return this.accountsService.changeMyPassword(
+      req.user,
+      dto,
+    );
+  }
+
+  // Complete owner transfer to an existing AppUser in this same Account.
+  // The target keeps their existing password hash and lower memberships.
+  // The former owner loses owner/super_admin authority and both parties must
+  // authenticate again so their session claims reflect the new ownership.
+  @Roles("owner", "super_admin")
+  @Post("me/ownership/transfer")
+  transferOwnership(
+    @Req() req: any,
+    @Body() dto: TransferOwnershipDto,
+  ) {
+    return this.accountsService.transferOwnership(
       req.user,
       dto,
     );
