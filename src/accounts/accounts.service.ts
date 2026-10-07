@@ -12,6 +12,7 @@ import {
   CreateAccountUserDto,
   UpdateAccountDto,
   UpdateAccountSettingsDto,
+  TransferOwnershipDto,
   UpdateAccountUserDto,
   UpdateAccountUserStatusDto,
   UpdateMyProfileDto,
@@ -42,6 +43,23 @@ const OWNER_ONLY_ROLES = new Set([
   "owner",
   "super_admin",
 ]);
+
+// Customer-account ownership roles. developer/platform_team can manage the
+// platform but are not treated as the transferable owner identity.
+const ACCOUNT_OWNER_ROLES = new Set(["owner", "super_admin"]);
+
+// Used only when removing owner authority from a former owner. If the person
+// already has lower active memberships, keep them active under the strongest
+// remaining membership. If none remain, their AppUser is deactivated.
+const NON_OWNER_ROLE_PRIORITY = [
+  "school_admin",
+  "admin",
+  "branch_admin",
+  "accountant",
+  "teacher",
+  "parent",
+  "student",
+];
 
 const BRANCH_ASSIGNABLE_ROLES = new Set([
   "accountant",
@@ -127,6 +145,54 @@ export class AccountsService {
     if (!this.isOwnerLevelRole(role)) {
       throw new ForbiddenException("Only the owner can perform this action.");
     }
+  }
+
+
+  private isTransferableAccountOwnerRole(role: string): boolean {
+    const normalized = normalizeRole(role);
+    if (!normalized) return false;
+    const canonical = normalized === "admin" ? "school_admin" : normalized;
+    return ACCOUNT_OWNER_ROLES.has(canonical);
+  }
+
+  private assertCanTransferOwnership(role: string) {
+    if (!this.isTransferableAccountOwnerRole(role)) {
+      throw new ForbiddenException(
+        "Only the current account owner can transfer ownership.",
+      );
+    }
+  }
+
+  private getHighestRemainingNonOwnerRole(
+    memberships: Array<{ role: string; active?: boolean; status?: string }>,
+  ): string | null {
+    const activeRoles = new Set(
+      memberships
+        .filter(
+          (membership) =>
+            membership.active !== false &&
+            (!membership.status || membership.status === "active"),
+        )
+        .map((membership) => {
+          const normalized = normalizeRole(membership.role);
+          if (!normalized) return "";
+          return normalized === "admin" ? "school_admin" : normalized;
+        })
+        .filter(
+          (role) =>
+            Boolean(role) &&
+            !ACCOUNT_OWNER_ROLES.has(role) &&
+            role !== "developer" &&
+            role !== "platform_team",
+        ),
+    );
+
+    for (const role of NON_OWNER_ROLE_PRIORITY) {
+      const canonical = role === "admin" ? "school_admin" : role;
+      if (activeRoles.has(canonical)) return canonical;
+    }
+
+    return null;
   }
 
   // ======================================================
@@ -506,6 +572,424 @@ export class AccountsService {
       email: user.email,
       passwordChangedAt: user.passwordChangedAt,
       updatedAt: user.updatedAt,
+    };
+  }
+
+
+  // ======================================================
+  // COMPLETE OWNERSHIP TRANSFER
+  //
+  // Ownership moves to an EXISTING AppUser in this same Account.
+  // The target user's email/passwordHash are not copied or changed: the new
+  // owner keeps signing in with the exact same email/password they already had.
+  // Account.email/phone are synchronized to the target user's identity.
+  //
+  // All existing lower memberships on the target remain intact. Owner and
+  // super_admin authority is revoked from every other owner-level identity in
+  // this Account so the transfer leaves one canonical customer owner.
+  // ======================================================
+
+  async transferOwnership(actor: AuthUser, dto: TransferOwnershipDto) {
+    this.assertCanTransferOwnership(actor.role);
+
+    const currentOwner = await this.prisma.appUser.findUnique({
+      where: { id: actor.id },
+      include: { memberships: true },
+    });
+
+    if (!currentOwner) {
+      throw new NotFoundException("Current owner login was not found.");
+    }
+
+    assertSameAccountOrDeveloper(actor, currentOwner.accountId);
+
+    if (!currentOwner.active) {
+      throw new ForbiddenException("The current owner login is inactive.");
+    }
+
+    if (!this.isTransferableAccountOwnerRole(currentOwner.role)) {
+      throw new ForbiddenException(
+        "The current login is not the transferable account owner.",
+      );
+    }
+
+    const passwordMatches = await bcrypt.compare(
+      dto.currentPassword,
+      currentOwner.passwordHash,
+    );
+
+    if (!passwordMatches) {
+      throw new BadRequestException("Current password is incorrect.");
+    }
+
+    const targetUserId = String(dto.targetUserId || "").trim();
+    if (!targetUserId) {
+      throw new BadRequestException("Select the user who should become owner.");
+    }
+
+    if (targetUserId === currentOwner.id) {
+      throw new BadRequestException("You are already the current owner.");
+    }
+
+    const target = await this.prisma.appUser.findUnique({
+      where: { id: targetUserId },
+      include: { memberships: true },
+    });
+
+    if (!target) {
+      throw new NotFoundException("The selected new owner was not found.");
+    }
+
+    if (target.accountId !== currentOwner.accountId) {
+      throw new ForbiddenException(
+        "Ownership can only be transferred to a user in this same account.",
+      );
+    }
+
+    if (!target.active) {
+      throw new BadRequestException(
+        "The selected user is inactive. Activate the user before transferring ownership.",
+      );
+    }
+
+    const targetRole = normalizeRole(target.role);
+    if (targetRole === "developer" || targetRole === "platform_team") {
+      throw new BadRequestException(
+        "Platform developer/team identities cannot become the customer account owner.",
+      );
+    }
+
+    // Account.email is unique across owner/customer Accounts. The target AppUser
+    // already owns target.email in AppUser, which is exactly what we want to keep.
+    const otherAccountUsingTargetEmail = await this.prisma.account.findUnique({
+      where: { email: target.email.toLowerCase().trim() },
+      select: { id: true },
+    });
+
+    if (
+      otherAccountUsingTargetEmail &&
+      otherAccountUsingTargetEmail.id !== currentOwner.accountId
+    ) {
+      throw new ConflictException({
+        code: "TARGET_EMAIL_BELONGS_TO_ANOTHER_ACCOUNT",
+        message:
+          "The selected user's email is already the owner email of another account.",
+      });
+    }
+
+    const now = new Date();
+    const ownerScopeKey = buildMembershipScopeKey({
+      accountId: currentOwner.accountId,
+      role: "owner",
+    });
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const account = await tx.account.findUnique({
+        where: { id: currentOwner.accountId },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          status: true,
+        },
+      });
+
+      if (!account) {
+        throw new NotFoundException("Account not found.");
+      }
+
+      // Load every account user so any legacy duplicate owner/super_admin
+      // authority can be removed. Lower memberships are never removed.
+      const allUsers = await tx.appUser.findMany({
+        where: { accountId: currentOwner.accountId },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          role: true,
+          active: true,
+          memberships: {
+            select: {
+              id: true,
+              role: true,
+              active: true,
+              status: true,
+              createdAt: true,
+            },
+          },
+        },
+      });
+
+      const displacedOwnerIds: string[] = [];
+
+      for (const user of allUsers) {
+        if (user.id === target.id) continue;
+
+        const hasOwnerRole = this.isTransferableAccountOwnerRole(user.role);
+        const hasOwnerMembership = user.memberships.some(
+          (membership) =>
+            membership.active !== false &&
+            (!membership.status || membership.status === "active") &&
+            this.isTransferableAccountOwnerRole(membership.role),
+        );
+
+        if (!hasOwnerRole && !hasOwnerMembership) continue;
+
+        displacedOwnerIds.push(user.id);
+
+        await tx.userMembership.updateMany({
+          where: {
+            accountId: currentOwner.accountId,
+            userId: user.id,
+            role: { in: ["owner", "super_admin"] },
+            active: true,
+          },
+          data: {
+            active: false,
+            status: "revoked",
+            endedAt: now,
+            isDefault: false,
+          },
+        });
+
+        const remainingMemberships = await tx.userMembership.findMany({
+          where: {
+            accountId: currentOwner.accountId,
+            userId: user.id,
+            active: true,
+            status: "active",
+          },
+          select: {
+            role: true,
+            active: true,
+            status: true,
+          },
+        });
+
+        const fallbackRole =
+          this.getHighestRemainingNonOwnerRole(remainingMemberships);
+
+        await tx.appUser.update({
+          where: { id: user.id },
+          data: fallbackRole
+            ? {
+                role: fallbackRole,
+                active: true,
+              }
+            : {
+                // No lower access remains. Keep the historical fallback role
+                // value untouched for compatibility, but deactivate the login.
+                // Owner authority is already removed by memberships + sessions.
+                active: false,
+              },
+        });
+      }
+
+      // Canonicalize the target's owner authority. Existing lower memberships
+      // remain intact and their profile passwordHash is never touched.
+      await tx.userMembership.updateMany({
+        where: {
+          accountId: currentOwner.accountId,
+          userId: target.id,
+          role: { in: ["owner", "super_admin"] },
+        },
+        data: {
+          active: false,
+          status: "revoked",
+          endedAt: now,
+          isDefault: false,
+        },
+      });
+
+      await tx.userMembership.updateMany({
+        where: {
+          accountId: currentOwner.accountId,
+          userId: target.id,
+        },
+        data: { isDefault: false },
+      });
+
+      await tx.userMembership.upsert({
+        where: {
+          accountId_userId_scopeKey: {
+            accountId: currentOwner.accountId,
+            userId: target.id,
+            scopeKey: ownerScopeKey,
+          },
+        },
+        update: {
+          role: "owner",
+          schoolId: null,
+          branchId: null,
+          teacherId: null,
+          studentId: null,
+          parentId: null,
+          active: true,
+          status: "active",
+          isDefault: true,
+          acceptedAt: now,
+          suspendedAt: null,
+          endedAt: null,
+        },
+        create: {
+          accountId: currentOwner.accountId,
+          userId: target.id,
+          role: "owner",
+          scopeKey: ownerScopeKey,
+          active: true,
+          status: "active",
+          isDefault: true,
+          acceptedAt: now,
+          createdByUserId: currentOwner.id,
+        },
+      });
+
+      const newOwner = await tx.appUser.update({
+        where: { id: target.id },
+        data: {
+          role: "owner",
+          active: true,
+          failedLoginCount: 0,
+          lockedUntil: null,
+          // passwordHash intentionally unchanged.
+        },
+        select: {
+          id: true,
+          accountId: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          role: true,
+          preferredLocale: true,
+          active: true,
+          emailVerifiedAt: true,
+          phoneVerifiedAt: true,
+          passwordChangedAt: true,
+          lastLoginAt: true,
+          createdAt: true,
+          updatedAt: true,
+          memberships: {
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+
+      const updatedAccount = await tx.account.update({
+        where: { id: currentOwner.accountId },
+        data: {
+          email: target.email.toLowerCase().trim(),
+          phone: target.phone?.trim() || null,
+        },
+      });
+
+      // Revoke both former-owner and new-owner sessions. Former owner must lose
+      // stale owner claims; new owner must log in again to receive owner claims.
+      const sessionUserIds = Array.from(
+        new Set([...displacedOwnerIds, target.id]),
+      );
+
+      const revokedSessions = await tx.userSession.updateMany({
+        where: {
+          accountId: currentOwner.accountId,
+          userId: { in: sessionUserIds },
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: now,
+          lastSeenAt: now,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          accountId: currentOwner.accountId,
+          actorUserId: currentOwner.id,
+          actorEmail: currentOwner.email,
+          actorRole: currentOwner.role,
+          action: "update",
+          moduleKey: "accounts",
+          entityType: "ownership_transfer",
+          entityId: currentOwner.accountId,
+          before: {
+            ownerUserId: currentOwner.id,
+            ownerEmail: account.email,
+            ownerPhone: account.phone,
+          },
+          after: {
+            ownerUserId: target.id,
+            ownerEmail: target.email,
+            ownerPhone: target.phone || null,
+          },
+          metadata: {
+            targetUserId: target.id,
+            displacedOwnerUserIds: displacedOwnerIds,
+            targetPasswordPreserved: true,
+            targetExistingMembershipsPreserved: true,
+          },
+        },
+      });
+
+      return {
+        account: updatedAccount,
+        newOwner,
+        displacedOwnerIds,
+        revokedSessionCount: revokedSessions.count,
+      };
+    });
+
+    const displacedUsers = await Promise.all(
+      result.displacedOwnerIds.map((userId) => this.getSafeUser(userId)),
+    );
+
+    for (const displacedUser of displacedUsers) {
+      if (!displacedUser) continue;
+      this.realtime.emitMembershipsChanged({
+        accountId: currentOwner.accountId,
+        userId: displacedUser.id,
+        action: "updated",
+        active: displacedUser.active !== false,
+        metadata: {
+          operation: "ownership-transferred-away",
+          newOwnerUserId: target.id,
+        },
+      });
+    }
+
+    this.realtime.emitMembershipsChanged({
+      accountId: currentOwner.accountId,
+      userId: target.id,
+      action: "updated",
+      active: true,
+      metadata: {
+        operation: "ownership-transferred-in",
+        previousOwnerUserId: currentOwner.id,
+      },
+    });
+
+    this.realtime.emitAccountDataChanged({
+      accountId: currentOwner.accountId,
+      changedTables: ["accounts", "users", "memberships", "sessions"],
+      metadata: {
+        action: "ownership-transferred",
+        previousOwnerUserId: currentOwner.id,
+        newOwnerUserId: target.id,
+      },
+    });
+
+    const previousOwner = await this.getSafeUser(currentOwner.id);
+
+    return {
+      success: true,
+      message:
+        "Ownership transferred successfully. The new owner can sign in with their existing email and existing password.",
+      account: result.account,
+      newOwner: result.newOwner,
+      previousOwner,
+      revokedSessionCount: result.revokedSessionCount,
+      requiresReauthentication: true,
+      targetPasswordPreserved: true,
     };
   }
 
