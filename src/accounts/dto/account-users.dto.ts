@@ -221,6 +221,16 @@ export class ChangeMyPasswordDto {
   newPassword!: string;
 }
 
+export class TransferOwnershipDto {
+  @IsString()
+  @MinLength(1)
+  targetUserId!: string;
+
+  @IsString()
+  @MinLength(1)
+  currentPassword!: string;
+}
+
 // ======================================================
 // ACCOUNT SYSTEM SETTINGS
 //
