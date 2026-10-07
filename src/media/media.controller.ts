@@ -178,28 +178,38 @@ export class MediaController {
   private requestBaseUrl(
     req: AuthenticatedRequest,
   ): string {
+    const configuredBaseUrl =
+      String(process.env.PUBLIC_API_URL || "")
+        .trim()
+        .replace(/\/+$/, "");
+  
+    if (configuredBaseUrl) {
+      return configuredBaseUrl;
+    }
+  
     const forwardedProtocol = this.firstForwardedValue(
       req.headers["x-forwarded-proto"],
     );
-
+  
     const forwardedHost = this.firstForwardedValue(
       req.headers["x-forwarded-host"],
     );
-
+  
     const protocol =
       forwardedProtocol ||
       req.protocol ||
       "http";
-
+  
     const host =
       forwardedHost ||
       req.get("host") ||
       req.headers.host ||
       "localhost:4000";
-
+  
     return `${protocol}://${host}`;
   }
-
+  
+    
   private firstForwardedValue(
     value: string | string[] | undefined,
   ): string {
