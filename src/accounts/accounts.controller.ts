@@ -61,6 +61,9 @@ export class AccountsController {
     );
   }
 
+  // Current authenticated user profile. For the owner portal, the service
+  // also returns the matching Account owner/customer record so the UI can
+  // keep owner identity synchronized across Account + AppUser.
   @Get("me/profile")
   getMyProfile(@Req() req: any) {
     return this.accountsService.getMyProfile(req.user);
@@ -77,6 +80,8 @@ export class AccountsController {
     );
   }
 
+  // Owner email changes are synchronized by the service across:
+  // Account.email + the owner's AppUser.email.
   @Patch("me/email")
   changeMyEmail(
     @Req() req: any,
@@ -88,6 +93,7 @@ export class AccountsController {
     );
   }
 
+  // Password is authentication-only and therefore remains AppUser-only.
   @Patch("me/password")
   changeMyPassword(
     @Req() req: any,
