@@ -1,27 +1,27 @@
 /**
  * src/media/media-storage.service.ts
  * --------------------------------------------------------------------------
- * Local filesystem media storage.
+ * Supabase-first media storage with temporary legacy filesystem fallback.
  *
- * Files are stored outside src/ so recompilation does not remove uploads:
+ * New uploads:
+ *   Supabase Storage -> <bucket>/<accountId>/<filename>
  *
- *   <MEDIA_UPLOAD_DIR or process.cwd()/uploads/media>/<accountId>/<filename>
+ * Reads:
+ *   1. Supabase Storage
+ *   2. Legacy Render/local filesystem fallback
  *
- * The returned URL is served through MediaController GET /media/files/:account/:file.
+ * This preserves the existing public API route:
+ *   GET /media/files/:accountId/:filename
  *
- * Portal Highlight media:
- * - dashboard highlights may use images or short videos;
- * - supported video formats are MP4, WebM and QuickTime/MOV;
- * - the default limit is 15 MB unless MEDIA_MAX_FILE_SIZE_BYTES overrides it.
- *
- * For production at scale, replace this service with S3, Cloudflare R2,
- * Supabase Storage, Google Cloud Storage, or another object-storage provider.
+ * so existing mediaAssets.publicUrl / remoteUrl values do not need to change
+ * immediately during the migration.
  */
 
 import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
@@ -38,7 +38,13 @@ import {
   resolve,
 } from "path";
 
+import { Readable } from "stream";
 import { randomUUID } from "crypto";
+
+import {
+  createClient,
+  type SupabaseClient,
+} from "@supabase/supabase-js";
 
 export type StoredMediaFile = {
   storageKey: string;
@@ -55,8 +61,6 @@ const MIME_EXTENSION: Record<string, string> = {
   "image/gif": ".gif",
   "image/avif": ".avif",
   "image/svg+xml": ".svg",
-
-  // Portal Highlight video support.
   "video/mp4": ".mp4",
   "video/webm": ".webm",
   "video/quicktime": ".mov",
@@ -71,9 +75,58 @@ const EXTENSION_MIME: Record<string, string> = Object.fromEntries(
 
 @Injectable()
 export class MediaStorageService {
+  private readonly supabase: SupabaseClient;
+  private readonly bucket: string;
+
   constructor(
     private readonly config: ConfigService,
-  ) {}
+  ) {
+    const supabaseUrl =
+      String(
+        this.config.get<string>("SUPABASE_URL") || "",
+      ).trim();
+
+    const supabaseSecretKey =
+      String(
+        this.config.get<string>("SUPABASE_SECRET_KEY") || "",
+      ).trim();
+
+    this.bucket =
+      String(
+        this.config.get<string>("SUPABASE_MEDIA_BUCKET") ||
+          "eleeveon-media",
+      ).trim();
+
+    if (!supabaseUrl) {
+      throw new Error(
+        "SUPABASE_URL is required for media storage.",
+      );
+    }
+
+    if (!supabaseSecretKey) {
+      throw new Error(
+        "SUPABASE_SECRET_KEY is required for media storage.",
+      );
+    }
+
+    if (!this.bucket) {
+      throw new Error(
+        "SUPABASE_MEDIA_BUCKET is required for media storage.",
+      );
+    }
+
+    this.supabase = createClient(
+      supabaseUrl,
+      supabaseSecretKey,
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+      },
+    );
+  }
 
   get maxFileSizeBytes() {
     const configured = Number(
@@ -262,38 +315,35 @@ export class MediaStorageService {
     const filename =
       `${Date.now()}-${randomUUID()}${extension}`;
 
-    const directory =
-      join(
-        this.rootDirectory(),
-        accountSegment,
+    const storageKey =
+      `${accountSegment}/${filename}`;
+
+    const { error } =
+      await this.supabase.storage
+        .from(this.bucket)
+        .upload(
+          storageKey,
+          file.buffer,
+          {
+            contentType:
+              mimeType ||
+              "application/octet-stream",
+            cacheControl: "31536000",
+            upsert: false,
+          },
+        );
+
+    if (error) {
+      throw new ServiceUnavailableException(
+        `Media upload to Supabase failed: ${error.message}`,
       );
-
-    await fs.mkdir(
-      directory,
-      {
-        recursive: true,
-      },
-    );
-
-    const absolutePath =
-      join(
-        directory,
-        filename,
-      );
-
-    await fs.writeFile(
-      absolutePath,
-      file.buffer,
-      {
-        flag: "wx",
-      },
-    );
+    }
 
     return {
-      storageKey:
-        `${accountSegment}/${filename}`,
+      storageKey,
       filename,
-      absolutePath,
+      absolutePath:
+        `supabase://${this.bucket}/${storageKey}`,
       mimeType,
       sizeBytes,
     };
@@ -323,7 +373,49 @@ export class MediaStorageService {
       );
     }
 
-    const absolutePath =
+    const storageKey =
+      `${accountSegment}/${safeFilename}`;
+
+    const {
+      data: supabaseFile,
+      error: supabaseError,
+    } =
+      await this.supabase.storage
+        .from(this.bucket)
+        .download(
+          storageKey,
+        );
+
+    if (
+      !supabaseError &&
+      supabaseFile
+    ) {
+      const arrayBuffer =
+        await supabaseFile.arrayBuffer();
+
+      const buffer =
+        Buffer.from(
+          arrayBuffer,
+        );
+
+      return {
+        absolutePath:
+          `supabase://${this.bucket}/${storageKey}`,
+        stream:
+          Readable.from(
+            buffer,
+          ),
+        sizeBytes:
+          buffer.length,
+        mimeType:
+          supabaseFile.type ||
+          this.mimeFromFilename(
+            safeFilename,
+          ),
+      };
+    }
+
+    const legacyAbsolutePath =
       join(
         this.rootDirectory(),
         accountSegment,
@@ -331,39 +423,80 @@ export class MediaStorageService {
       );
 
     if (
-      !existsSync(
-        absolutePath,
+      existsSync(
+        legacyAbsolutePath,
       )
     ) {
-      throw new NotFoundException(
-        "Media file not found.",
+      const stat =
+        await fs.stat(
+          legacyAbsolutePath,
+        );
+
+      if (
+        stat.isFile()
+      ) {
+        return {
+          absolutePath:
+            legacyAbsolutePath,
+          stream:
+            createReadStream(
+              legacyAbsolutePath,
+            ),
+          sizeBytes:
+            stat.size,
+          mimeType:
+            this.mimeFromFilename(
+              safeFilename,
+            ),
+        };
+      }
+    }
+
+    if (
+      supabaseError &&
+      !this.isStorageNotFoundError(
+        supabaseError,
+      )
+    ) {
+      throw new ServiceUnavailableException(
+        `Media storage is temporarily unavailable: ${supabaseError.message}`,
       );
     }
 
-    const stat =
-      await fs.stat(
-        absolutePath,
+    throw new NotFoundException(
+      "Media file not found.",
+    );
+  }
+
+  private isStorageNotFoundError(
+    error: any,
+  ) {
+    const status =
+      Number(
+        error?.statusCode ??
+        error?.status ??
+        0,
       );
 
-    if (!stat.isFile()) {
-      throw new NotFoundException(
-        "Media file not found.",
-      );
+    if (
+      status === 404
+    ) {
+      return true;
     }
 
-    return {
-      absolutePath,
-      stream:
-        createReadStream(
-          absolutePath,
-        ),
-      sizeBytes:
-        stat.size,
-      mimeType:
-        this.mimeFromFilename(
-          safeFilename,
-        ),
-    };
+    const message =
+      String(
+        error?.message || "",
+      ).toLowerCase();
+
+    return (
+      message.includes(
+        "not found",
+      ) ||
+      message.includes(
+        "object not found",
+      )
+    );
   }
 
   private mimeFromFilename(
