@@ -1,20 +1,25 @@
 /**
  * src/media/media-storage.service.ts
  * --------------------------------------------------------------------------
- * Supabase-first media storage with temporary legacy filesystem fallback.
+ * Supabase-only media storage.
  *
  * New uploads:
  *   Supabase Storage -> <bucket>/<accountId>/<filename>
  *
  * Reads:
- *   1. Supabase Storage
- *   2. Legacy Render/local filesystem fallback
+ *   Supabase Storage only
  *
- * This preserves the existing public API route:
+ * The existing public API route remains unchanged:
  *   GET /media/files/:accountId/:filename
  *
- * so existing mediaAssets.publicUrl / remoteUrl values do not need to change
- * immediately during the migration.
+ * This means existing mediaAssets.publicUrl / remoteUrl values such as:
+ *
+ *   https://eleeveon-schools-backend.onrender.com/media/files/...
+ *
+ * continue to work.
+ *
+ * Render is now only serving the API request.
+ * Media binaries are stored exclusively in Supabase Storage.
  */
 
 import {
@@ -23,19 +28,12 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
 
-import {
-  createReadStream,
-  existsSync,
-  promises as fs,
-} from "fs";
+import { ConfigService } from "@nestjs/config";
 
 import {
   basename,
   extname,
-  join,
-  resolve,
 } from "path";
 
 import { Readable } from "stream";
@@ -49,7 +47,15 @@ import {
 export type StoredMediaFile = {
   storageKey: string;
   filename: string;
+
+  /**
+   * Kept for compatibility with existing code.
+   *
+   * This is no longer a real filesystem path.
+   * It is a logical Supabase storage location.
+   */
   absolutePath: string;
+
   mimeType: string;
   sizeBytes: number;
 };
@@ -61,21 +67,26 @@ const MIME_EXTENSION: Record<string, string> = {
   "image/gif": ".gif",
   "image/avif": ".avif",
   "image/svg+xml": ".svg",
+
   "video/mp4": ".mp4",
   "video/webm": ".webm",
   "video/quicktime": ".mov",
 };
 
-const EXTENSION_MIME: Record<string, string> = Object.fromEntries(
-  Object.entries(MIME_EXTENSION).map(([mimeType, extension]) => [
-    extension,
-    mimeType,
-  ]),
-);
+const EXTENSION_MIME: Record<string, string> =
+  Object.fromEntries(
+    Object.entries(MIME_EXTENSION).map(
+      ([mimeType, extension]) => [
+        extension,
+        mimeType,
+      ],
+    ),
+  );
 
 @Injectable()
 export class MediaStorageService {
   private readonly supabase: SupabaseClient;
+
   private readonly bucket: string;
 
   constructor(
@@ -83,18 +94,23 @@ export class MediaStorageService {
   ) {
     const supabaseUrl =
       String(
-        this.config.get<string>("SUPABASE_URL") || "",
+        this.config.get<string>(
+          "SUPABASE_URL",
+        ) || "",
       ).trim();
 
     const supabaseSecretKey =
       String(
-        this.config.get<string>("SUPABASE_SECRET_KEY") || "",
+        this.config.get<string>(
+          "SUPABASE_SECRET_KEY",
+        ) || "",
       ).trim();
 
     this.bucket =
       String(
-        this.config.get<string>("SUPABASE_MEDIA_BUCKET") ||
-          "eleeveon-media",
+        this.config.get<string>(
+          "SUPABASE_MEDIA_BUCKET",
+        ) || "eleeveon-media",
       ).trim();
 
     if (!supabaseUrl) {
@@ -129,16 +145,19 @@ export class MediaStorageService {
   }
 
   get maxFileSizeBytes() {
-    const configured = Number(
-      this.config.get<string>(
-        "MEDIA_MAX_FILE_SIZE_BYTES",
-      ),
-    );
+    const configured =
+      Number(
+        this.config.get<string>(
+          "MEDIA_MAX_FILE_SIZE_BYTES",
+        ),
+      );
 
-    return Number.isFinite(configured) &&
+    return (
+      Number.isFinite(configured) &&
       configured > 0
-      ? configured
-      : 15 * 1024 * 1024;
+        ? configured
+        : 15 * 1024 * 1024
+    );
   }
 
   get allowedMimeTypes() {
@@ -151,8 +170,11 @@ export class MediaStorageService {
       return new Set(
         configured
           .split(",")
-          .map((value) =>
-            value.trim().toLowerCase(),
+          .map(
+            (value) =>
+              value
+                .trim()
+                .toLowerCase(),
           )
           .filter(Boolean),
       );
@@ -165,22 +187,10 @@ export class MediaStorageService {
     );
   }
 
-  private rootDirectory() {
-    const configured =
-      this.config.get<string>(
-        "MEDIA_UPLOAD_DIR",
-      );
-
-    return resolve(
-      configured ||
-        join(
-          process.cwd(),
-          "uploads",
-          "media",
-        ),
-    );
-  }
-
+  /**
+   * Clean a path segment so account IDs cannot escape
+   * their own Supabase Storage directory.
+   */
   private cleanSegment(
     value: string,
     label: string,
@@ -202,6 +212,12 @@ export class MediaStorageService {
     return clean;
   }
 
+  /**
+   * Determine the extension to use for a newly uploaded file.
+   *
+   * Known MIME types receive their standard extension.
+   * Unknown but valid original extensions are retained.
+   */
   private extensionFor(
     originalName: string,
     mimeType: string,
@@ -237,6 +253,11 @@ export class MediaStorageService {
     return ".bin";
   }
 
+  /**
+   * Store a new media file.
+   *
+   * Supabase Storage is now the only backend storage provider.
+   */
   async store(
     accountId: string,
     file: {
@@ -270,7 +291,9 @@ export class MediaStorageService {
       )
     ) {
       throw new BadRequestException(
-        `Unsupported media type: ${mimeType || "unknown"}.`,
+        `Unsupported media type: ${
+          mimeType || "unknown"
+        }.`,
       );
     }
 
@@ -318,9 +341,13 @@ export class MediaStorageService {
     const storageKey =
       `${accountSegment}/${filename}`;
 
-    const { error } =
+    const {
+      error,
+    } =
       await this.supabase.storage
-        .from(this.bucket)
+        .from(
+          this.bucket,
+        )
         .upload(
           storageKey,
           file.buffer,
@@ -328,8 +355,12 @@ export class MediaStorageService {
             contentType:
               mimeType ||
               "application/octet-stream",
-            cacheControl: "31536000",
-            upsert: false,
+
+            cacheControl:
+              "31536000",
+
+            upsert:
+              false,
           },
         );
 
@@ -341,14 +372,26 @@ export class MediaStorageService {
 
     return {
       storageKey,
+
       filename,
+
       absolutePath:
         `supabase://${this.bucket}/${storageKey}`,
+
       mimeType,
+
       sizeBytes,
     };
   }
 
+  /**
+   * Open an existing media file.
+   *
+   * Supabase Storage is the ONLY source.
+   *
+   * There is intentionally no Render/local filesystem
+   * fallback anymore.
+   */
   async open(
     accountId: string,
     filename: string,
@@ -381,101 +424,89 @@ export class MediaStorageService {
       error: supabaseError,
     } =
       await this.supabase.storage
-        .from(this.bucket)
+        .from(
+          this.bucket,
+        )
         .download(
           storageKey,
         );
 
-    if (
-      !supabaseError &&
-      supabaseFile
-    ) {
-      const arrayBuffer =
-        await supabaseFile.arrayBuffer();
-
-      const buffer =
-        Buffer.from(
-          arrayBuffer,
-        );
-
-      return {
-        absolutePath:
-          `supabase://${this.bucket}/${storageKey}`,
-        stream:
-          Readable.from(
-            buffer,
-          ),
-        sizeBytes:
-          buffer.length,
-        mimeType:
-          supabaseFile.type ||
-          this.mimeFromFilename(
-            safeFilename,
-          ),
-      };
-    }
-
-    const legacyAbsolutePath =
-      join(
-        this.rootDirectory(),
-        accountSegment,
-        safeFilename,
-      );
-
-    if (
-      existsSync(
-        legacyAbsolutePath,
-      )
-    ) {
-      const stat =
-        await fs.stat(
-          legacyAbsolutePath,
-        );
-
-      if (
-        stat.isFile()
-      ) {
-        return {
-          absolutePath:
-            legacyAbsolutePath,
-          stream:
-            createReadStream(
-              legacyAbsolutePath,
-            ),
-          sizeBytes:
-            stat.size,
-          mimeType:
-            this.mimeFromFilename(
-              safeFilename,
-            ),
-        };
-      }
-    }
-
+    /**
+     * Supabase genuinely does not contain this object.
+     */
     if (
       supabaseError &&
-      !this.isStorageNotFoundError(
+      this.isStorageNotFoundError(
         supabaseError,
       )
     ) {
+      throw new NotFoundException(
+        "Media file not found.",
+      );
+    }
+
+    /**
+     * Supabase returned some other storage/network error.
+     */
+    if (supabaseError) {
       throw new ServiceUnavailableException(
         `Media storage is temporarily unavailable: ${supabaseError.message}`,
       );
     }
 
-    throw new NotFoundException(
-      "Media file not found.",
-    );
+    /**
+     * Defensive check in case Supabase returns no error
+     * but also no file.
+     */
+    if (!supabaseFile) {
+      throw new NotFoundException(
+        "Media file not found.",
+      );
+    }
+
+    const arrayBuffer =
+      await supabaseFile.arrayBuffer();
+
+    const buffer =
+      Buffer.from(
+        arrayBuffer,
+      );
+
+    return {
+      absolutePath:
+        `supabase://${this.bucket}/${storageKey}`,
+
+      stream:
+        Readable.from(
+          buffer,
+        ),
+
+      sizeBytes:
+        buffer.length,
+
+      mimeType:
+        supabaseFile.type ||
+        this.mimeFromFilename(
+          safeFilename,
+        ),
+    };
   }
 
+  /**
+   * Supabase Storage SDK error objects can differ
+   * slightly depending on the failure source.
+   *
+   * Treat recognized 404 / object-not-found errors as
+   * ordinary missing-media responses.
+   */
   private isStorageNotFoundError(
     error: any,
   ) {
     const status =
       Number(
         error?.statusCode ??
-        error?.status ??
-        0,
+          error?.status ??
+          0,
       );
 
     if (
@@ -499,6 +530,10 @@ export class MediaStorageService {
     );
   }
 
+  /**
+   * Fallback MIME detection for downloaded objects
+   * whose response Blob does not contain a useful type.
+   */
   private mimeFromFilename(
     filename: string,
   ) {
