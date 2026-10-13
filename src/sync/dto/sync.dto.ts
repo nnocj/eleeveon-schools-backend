@@ -1,13 +1,10 @@
-
 /**
  * src/sync/dto/sync.dto.ts
  * --------------------------------------------------------------------------
- * Synchronization DTOs with Phase 21 priority workspace bootstrap.
+ * Synchronization DTOs — permanent string IDs and optional workspace paging.
  *
- * Final ID alignment:
- * - local-first records use string IDs across Dexie and Prisma;
- * - workspace bootstrap uses teacherId, studentId and parentId;
- * - the backend no longer uses teacherLocalId, studentLocalId or parentLocalId.
+ * Legacy workspace requests (without pageSize/cursor) continue to use the
+ * original full-bundle endpoint response.
  */
 
 import { Type } from "class-transformer";
@@ -49,9 +46,7 @@ export class SyncPushRecordDto {
   @IsString()
   tableName!: string;
 
-  /**
-   * Local-first records use string IDs throughout Dexie and Prisma.
-   */
+  /** Local-first UUID remains a string in Dexie and Prisma. */
   @IsString()
   localId!: string;
 
@@ -95,9 +90,7 @@ export class PushSyncDto {
   deviceId?: string;
 
   @IsArray()
-  @ValidateNested({
-    each: true,
-  })
+  @ValidateNested({ each: true })
   @Type(() => SyncPushRecordDto)
   records!: SyncPushRecordDto[];
 }
@@ -142,18 +135,13 @@ export class PullSyncDto {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(250)
-  @IsString({
-    each: true,
-  })
+  @IsString({ each: true })
   tableNames?: string[];
 }
 
 /**
- * A high-priority, role-scoped initial workspace request.
- *
- * accountId remains optional only for backward DTO compatibility.
- * The controller and service must always use req.user.accountId as the
- * authoritative account identity.
+ * Role-scoped bootstrap. JWT account and server-side membership are
+ * authoritative. Paging is additive and opt-in; legacy responses remain.
  */
 export class WorkspaceBootstrapDto {
   @IsOptional()
@@ -192,19 +180,25 @@ export class WorkspaceBootstrapDto {
   @IsString()
   parentId?: string;
 
-  /**
-   * Optional safe subset of the selected role's essential tables.
-   *
-   * The service must never permit tables outside the selected role's
-   * workspace bootstrap allow-list.
-   */
+  /** Restricts data to a subset of server-authorized role tables. */
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(100)
-  @IsString({
-    each: true,
-  })
+  @IsString({ each: true })
   tableNames?: string[];
+
+  /** Opt in to bounded network responses; 1–500 records. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(500)
+  pageSize?: number;
+
+  /** Opaque continuation token returned in the preceding page. */
+  @IsOptional()
+  @IsString()
+  cursor?: string;
 }
 
 export class RegisterSyncDeviceDto {
@@ -223,9 +217,7 @@ export class RegisterSyncDeviceDto {
   @IsString()
   deviceName?: string;
 
-  /**
-   * Legacy device-name alias retained for compatible clients.
-   */
+  /** Legacy device name alias. */
   @IsOptional()
   @IsString()
   name?: string;
@@ -268,16 +260,11 @@ export class ResolveSyncConflictDto {
   note?: string;
 }
 
-
-/**
- * Phase 2 forward-compatible sync metadata.
- *
- * The entitlement engine is enforced in the later sync-enforcement phase.
- * These contracts allow clients to receive quota-aware results without
- * changing the existing push/pull request behaviour in this phase.
- */
 export type SyncQuotaFailure = {
-  code: "SUBSCRIPTION_LIMIT_REACHED" | "SUBSCRIPTION_EXPIRED" | "FEATURE_DISABLED";
+  code:
+    | "SUBSCRIPTION_LIMIT_REACHED"
+    | "SUBSCRIPTION_EXPIRED"
+    | "FEATURE_DISABLED";
   tableName: string;
   localId: string;
   resource?: string;
