@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { createHash } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthUser } from "../common/auth-user";
 import { RealtimeEventsService } from "../realtime/realtime-events.service";
@@ -480,6 +481,11 @@ export class SyncService {
     actor: AuthUser,
     dto: WorkspaceBootstrapDto,
   ) {
+    // Strict opt-in: older frontend builds receive the original full bundle.
+    if (dto.pageSize !== undefined || Boolean(dto.cursor)) {
+      return this.workspaceBootstrapPaged(actor, dto);
+    }
+
     const accountId =
       this.requireActorAccount(
         actor,
@@ -715,6 +721,244 @@ export class SyncService {
     };
   }
 
+  /**
+   * Paginated, role-authorized workspace-bootstrap response.
+   *
+   * COMPATIBILITY: activated only by pageSize/cursor. Legacy requests still
+   * receive the unchanged one-response bundle from workspaceBootstrap().
+   *
+   * The current data model keeps relationship-based roles in JSON SyncRecords.
+   * To avoid incorrect parent/media access, this first implementation builds
+   * the complete authorized candidate set and then pages its result. Thus it
+   * saves NETWORK bandwidth and lets the client commit incrementally, but it
+   * is not database-side streaming. Replace with indexed, snapshot-consistent
+   * SQL/Prisma paging when those relationships are available as indexed data.
+   *
+   * A cursor is bound to account, membership, selected profiles, selected
+   * tables, page size, and a SHA-256 revision of the ordered scoped dataset.
+   * When that dataset changes, the caller MUST restart the page traversal.
+   */
+  private async workspaceBootstrapPaged(
+    actor: AuthUser,
+    dto: WorkspaceBootstrapDto,
+  ) {
+    const accountId = this.requireActorAccount(actor, dto.accountId);
+    await this.ensureAccount(accountId);
+    await this.syncPolicy.assertCanWorkspaceBootstrap(actor, accountId);
+
+    const membership = await this.resolveWorkspaceMembership(actor, dto);
+    const role = this.normalizeWorkspaceRole(membership.role);
+    const schoolId = this.cleanId(dto.schoolId ?? membership.schoolId);
+    const branchId = this.cleanId(dto.branchId ?? membership.branchId);
+    const teacherId = this.cleanId(dto.teacherId ?? membership.teacherId);
+    const studentId = this.cleanId(dto.studentId ?? membership.studentId);
+    const parentId = this.cleanId(dto.parentId ?? membership.parentId);
+
+    await this.assertWorkspaceScope({
+      actor, role, schoolId, branchId, teacherId, studentId, parentId,
+    });
+
+    const roleTables = this.workspaceBootstrapTables(role).sort();
+    const allowed = new Set(roleTables);
+    const requested = Array.isArray(dto.tableNames)
+      ? dto.tableNames.map((table) => this.cleanTableName(table))
+      : [];
+
+    // Do not silently fall back to ALL tables after an invalid narrow request.
+    if (requested.some((table) => !table || !allowed.has(table))) {
+      throw new ForbiddenException(
+        "A requested workspace table is not allowed for this membership.",
+      );
+    }
+
+    const tables = requested.length
+      ? [...new Set(requested as string[])].sort()
+      : roleTables;
+    const selected = new Set(tables);
+    const pageSize = Number(dto.pageSize ?? 150);
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 500) {
+      throw new BadRequestException("pageSize must be between 1 and 500.");
+    }
+
+    // Relationship resolution must see ALL role-permitted tables, not only
+    // `tableNames`: parent->child and media->owner depend on other tables.
+    const candidates = await this.prisma.syncRecord.findMany({
+      where: { accountId, tableName: { in: roleTables } },
+      orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    });
+
+    const scope = {
+      role, schoolId, branchId, teacherId, studentId, parentId,
+    };
+    const roleScoped = this.filterWorkspaceBootstrapRecords(candidates, scope);
+    const eligible = roleScoped.filter((record) => selected.has(record.tableName));
+
+    // The role/table authorization and this ordered record-set digest bind
+    // every page. Invalidated snapshots restart rather than skip records.
+    const scopeKey = [
+      accountId, membership.id, role, schoolId || "", branchId || "",
+      teacherId || "", studentId || "", parentId || "", tables.join(","),
+    ].join("|");
+    const revision = createHash("sha256")
+      .update(scopeKey)
+      .update(JSON.stringify(eligible.map((record) => [
+        record.id,
+        record.tableName,
+        String(record.updatedAt),
+        record.version,
+        Boolean(record.isDeleted),
+      ])))
+      .digest("hex");
+
+    let offset = 0;
+    if (dto.cursor) {
+      if (dto.cursor.length > 4096) {
+        throw new BadRequestException("Invalid workspace page cursor.");
+      }
+      let decoded: {
+        v?: number;
+        scopeKey?: string;
+        revision?: string;
+        offset?: number;
+        pageSize?: number;
+      };
+      try {
+        decoded = JSON.parse(
+          Buffer.from(dto.cursor, "base64url").toString("utf8"),
+        );
+      } catch {
+        throw new BadRequestException("Invalid workspace cursor encoding.");
+      }
+      if (
+        decoded?.v !== 1 ||
+        decoded.scopeKey !== scopeKey ||
+        decoded.pageSize !== pageSize ||
+        !Number.isSafeInteger(decoded.offset) ||
+        (decoded.offset ?? -1) < 0 ||
+        (decoded.offset ?? 0) >= eligible.length
+      ) {
+        throw new BadRequestException(
+          "Workspace cursor does not match the requested membership, tables or page size.",
+        );
+      }
+      if (decoded.revision !== revision) {
+        throw new BadRequestException(
+          "WORKSPACE_SNAPSHOT_CHANGED: Restart workspace download from page one.",
+        );
+      }
+      offset = decoded.offset!;
+    }
+
+    const page = eligible.slice(offset, offset + pageSize);
+    const hasMore = offset + page.length < eligible.length;
+    const nextCursor = hasMore
+      ? Buffer.from(JSON.stringify({
+          v: 1, scopeKey, revision, offset: offset + page.length, pageSize,
+        })).toString("base64url")
+      : null;
+
+    // Revalidate current membership before sending page data. This check is
+    // necessary but cannot substitute for immediate permission revocation in
+    // a previously cached offline client.
+    await this.resolveWorkspaceMembership(actor, {
+      ...dto,
+      membershipId: membership.id,
+    });
+
+    const records: any[] = [];
+    const quarantineRecords: any[] = [];
+    const changedTables = new Set<string>();
+    const tableCounts: Record<string, number> = {};
+
+    for (const record of page) {
+      const integrity = await this.validateStoredPullRecord(
+        actor, record, accountId,
+      );
+      // Never throw for invalid UUIDs before quarantining them.
+      const plain = {
+        tableName: record.tableName,
+        localId: this.cleanString(record.localId),
+        cloudId: record.id,
+        accountId: record.accountId,
+        deviceId: record.deviceId || undefined,
+        version: record.version,
+        updatedAt: Number(record.updatedAt),
+        isDeleted: record.isDeleted,
+        payload: record.payload,
+      };
+      if (integrity.ok) {
+        records.push(plain);
+        changedTables.add(record.tableName);
+        tableCounts[record.tableName] = (tableCounts[record.tableName] || 0) + 1;
+      } else {
+        quarantineRecords.push({
+          reason: integrity.reason || "INVALID_BOOTSTRAP_RECORD",
+          record: plain,
+        });
+      }
+    }
+
+    // Compute presentation data from the FULL scoped set. Its school/branch
+    // metadata is useful on the first page regardless of the requested table.
+    const workspace = this.buildWorkspaceSummary(
+      roleScoped.map((record) => ({
+        tableName: record.tableName,
+        localId: record.localId,
+        payload: record.payload,
+      })),
+      scope,
+    );
+
+    const platformCache = offset === 0
+      ? await this.lightweightWorkspacePlatformCache(actor, accountId)
+      : { records: [] as any[] };
+
+    await this.touchDevice({
+      accountId,
+      userId: actor.id,
+      deviceId: dto.deviceId,
+      lastPullAt: new Date(),
+      lastSeenAt: new Date(),
+    });
+
+    return {
+      ok: true,
+      accountId,
+      membershipId: membership.id,
+      role, schoolId, branchId, teacherId, studentId, parentId,
+      workspace,
+      school: workspace.school,
+      branch: workspace.branch,
+      schoolBranchSettings: workspace.settings,
+      requiredTables: tables,
+      roleRequiredTables: roleTables,
+      allRoleTablesRequested: tables.length === roleTables.length,
+      completed: !hasMore,
+      hasMore,
+      nextCursor,
+      pageSize,
+      pageOffset: offset,
+      records,
+      cacheRecords: platformCache.records,
+      quarantineRecords,
+      changedTables: [...changedTables],
+      bootstrapSchemaVersion: WORKSPACE_BOOTSTRAP_SCHEMA_VERSION,
+      includedTables: tables,
+      // This page's populated tables. Individual page results alone must
+      // NEVER be treated as proof of full workspace/table completeness.
+      tablesWithRecords: Object.keys(tableCounts),
+      bootstrapRevision: revision,
+      revision,
+      serverTime: Date.now(),
+      recordCount: records.length,
+      // This is the full number of role-scoped rows BEFORE integrity rejection.
+      totalRecords: eligible.length + platformCache.records.length,
+      tableCounts,
+      quarantinedCount: quarantineRecords.length,
+      truncated: false,
+    };
+  }
+
   async bootstrap(user: { id?: string; accountId?: string; email?: string; role?: string }, dto?: PlatformCacheDto) {
     const accountId = this.cleanId(dto?.accountId || user.accountId);
     if (!accountId) throw new BadRequestException("Account session is missing.");
@@ -883,7 +1127,6 @@ export class SyncService {
           take: 50,
         },
       ),
-      query("platformReleaseNotes", "platformReleaseNote", "findMany", { where: { active: true }, orderBy: { createdAt: "desc" }, take: 200 }),
       query(
         "platformAnnouncements",
         "platformAnnouncement",
@@ -930,6 +1173,7 @@ export class SyncService {
         },
       ),
 
+      query("platformReleaseNotes", "platformReleaseNote", "findMany", { where: { active: true }, orderBy: { createdAt: "desc" }, take: 200 }),
       query("invoices", "invoice", "findMany", { where: { accountId, ...(sinceDate ? { updatedAt: { gte: sinceDate } } : {}) }, orderBy: { updatedAt: "desc" }, take: 100 }),
       query("appPayments", "appPayment", "findMany", { where: { accountId, ...(sinceDate ? { updatedAt: { gte: sinceDate } } : {}) }, orderBy: { updatedAt: "desc" }, take: 100 }),
       query("billingEvents", "billingEvent", "findMany", { where: { accountId, ...(sinceDate ? { createdAt: { gte: sinceDate } } : {}) }, orderBy: { createdAt: "desc" }, take: 100 }),
@@ -965,7 +1209,9 @@ export class SyncService {
     const sanitized = { ...payload };
 
     for (const key of [
-      "passwordHash", "secret", "secretHash", "tokenHash", "refreshTokenHash",
+      "password", "encryptedPassword", "passwordSalt", "passwordHash",
+      "secret", "secretHash", "token", "tokenHash", "refreshToken",
+      "refreshTokenHash", "resetToken", "verificationToken",
       "privateKey", "apiKeyHash", "challenge", "challengeHash",
     ]) {
       delete sanitized[key];
@@ -1389,6 +1635,24 @@ export class SyncService {
       );
     }
 
+    // Profile memberships must resolve to their own permanent linked ID.
+    // This also protects legacy non-paginated workspace bootstrap.
+    const membershipRole = this.normalizeWorkspaceRole(membership.role);
+    const profileField: "teacherId" | "studentId" | "parentId" | null =
+      membershipRole === "teacher" ? "teacherId"
+        : membershipRole === "student" ? "studentId"
+          : membershipRole === "parent" ? "parentId"
+            : null;
+    if (profileField) {
+      const linkedId = this.cleanId((membership as any)[profileField]);
+      const requestedId = this.cleanId((dto as any)[profileField]);
+      if (!linkedId || (requestedId && requestedId !== linkedId)) {
+        throw new ForbiddenException(
+          `The selected ${profileField} is not linked to this membership.`,
+        );
+      }
+    }
+
     return membership;
   }
 
@@ -1559,8 +1823,7 @@ export class SyncService {
   private filterWorkspaceBootstrapRecords(
     records: any[],
     scope: {
-      role:
-        WorkspaceBootstrapRole;
+      role: WorkspaceBootstrapRole;
       schoolId?: string;
       branchId?: string;
       teacherId?: string;
@@ -1568,158 +1831,72 @@ export class SyncService {
       parentId?: string;
     },
   ) {
-    const childStudentIds =
-      new Set<string>();
-
-    if (
-      scope.role === "parent" &&
-      scope.parentId
-    ) {
+    // Build parent-child authorization from tenant-scoped parent links.
+    // Relationship data is needed even when the requested page is for a
+    // completely different table, such as assessmentScores or mediaAssets.
+    const childStudentIds = new Set<string>();
+    if (scope.role === "parent" && scope.parentId) {
       for (const record of records) {
         if (
-          record.tableName !==
-          "studentParents"
-        ) {
-          continue;
-        }
-
-        const payload =
-          (record.payload || {}) as Record<
-            string,
-            any
-          >;
-
-        if (
-          this.cleanId(
-            payload.parentId,
-          ) ===
-          scope.parentId
-        ) {
-          const studentId =
-            this.cleanId(
-              payload.studentId,
-            );
-
-          if (studentId) {
-            childStudentIds.add(
-              studentId,
-            );
-          }
+          record.tableName !== "studentParents" ||
+          !this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId)
+        ) continue;
+        const payload = (record.payload || {}) as Record<string, any>;
+        if (this.cleanId(payload.parentId) === scope.parentId) {
+          const id = this.cleanId(payload.studentId);
+          if (id) childStudentIds.add(id);
         }
       }
     }
 
-    const tenantScopedRecords = records.filter((record) =>
-      record.tableName !== "mediaAssets" &&
-      this.recordMatchesWorkspaceTenant(
-        record,
-        scope.schoolId,
-        scope.branchId,
-      ),
-    );
+    const roleScopedNonMedia = records.filter((record) => {
+      if (record.tableName === "mediaAssets") return false;
+      if (!this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId)) {
+        return false;
+      }
+      if (scope.role === "student" && scope.studentId) {
+        return this.recordMatchesStudentWorkspace(record, scope.studentId);
+      }
+      if (scope.role === "parent" && scope.parentId) {
+        return this.recordMatchesParentWorkspace(record, scope.parentId, childStudentIds);
+      }
+      if (scope.role === "teacher" && scope.teacherId) {
+        return this.recordMatchesTeacherWorkspace(record, scope.teacherId);
+      }
+      return true;
+    });
 
+    // A media asset may be returned only if its owner survived BOTH role and
+    // tenant scope checks. The previous tenant-only owner list could include
+    // records outside a student/parent's selected profile scope.
     const allowedOwnerIds = new Map<string, Set<string>>();
-
-    for (const record of tenantScopedRecords) {
-      const localId = this.cleanId(
-        record.payload?.id || record.localId,
-      );
-
-      if (!localId) continue;
-
-      const ids = allowedOwnerIds.get(record.tableName) || new Set<string>();
-      ids.add(localId);
-      allowedOwnerIds.set(record.tableName, ids);
+    for (const record of roleScopedNonMedia) {
+      const id = this.cleanId(record.payload?.id || record.localId);
+      if (!id) continue;
+      const owned = allowedOwnerIds.get(record.tableName) || new Set<string>();
+      owned.add(id);
+      allowedOwnerIds.set(record.tableName, owned);
     }
 
-    return records.filter(
-      (record) => {
-        const payload =
-          (record.payload || {}) as Record<
-            string,
-            any
-          >;
+    const profileScoped = ["student", "parent", "teacher"].includes(scope.role);
+    const scopedMedia = records.filter((record) => {
+      if (record.tableName !== "mediaAssets") return false;
+      const payload = (record.payload || {}) as Record<string, any>;
+      if (!this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId)) {
+        return false;
+      }
+      const ownerTable = this.cleanString(payload.ownerTable);
+      const ownerId = this.cleanId(payload.ownerId);
+      if (ownerTable && ownerId) {
+        return Boolean(allowedOwnerIds.get(ownerTable)?.has(ownerId));
+      }
+      // Unowned assets cannot be safely attributed to a profile.
+      return !profileScoped;
+    });
 
-        if (
-          record.isDeleted &&
-          !payload.isDeleted
-        ) {
-          payload.isDeleted =
-            true;
-        }
-
-        if (record.tableName === "mediaAssets") {
-          const mediaSchoolId = this.cleanId(payload.schoolId);
-          const mediaBranchId = this.cleanId(payload.branchId);
-
-          if (scope.schoolId && mediaSchoolId && mediaSchoolId !== scope.schoolId) {
-            return false;
-          }
-
-          if (scope.branchId && mediaBranchId && mediaBranchId !== scope.branchId) {
-            return false;
-          }
-
-          const ownerTable = this.cleanString(payload.ownerTable);
-          const ownerId = this.cleanId(payload.ownerId);
-
-          if (ownerTable && ownerId) {
-            return Boolean(allowedOwnerIds.get(ownerTable)?.has(ownerId));
-          }
-
-          return Boolean(
-            (!scope.schoolId || mediaSchoolId === scope.schoolId) &&
-            (!scope.branchId || mediaBranchId === scope.branchId),
-          );
-        }
-
-        if (
-          !this.recordMatchesWorkspaceTenant(
-            record,
-            scope.schoolId,
-            scope.branchId,
-          )
-        ) {
-          return false;
-        }
-
-        if (
-          scope.role ===
-            "student" &&
-          scope.studentId
-        ) {
-          return this.recordMatchesStudentWorkspace(
-            record,
-            scope.studentId,
-          );
-        }
-
-        if (
-          scope.role ===
-            "parent" &&
-          scope.parentId
-        ) {
-          return this.recordMatchesParentWorkspace(
-            record,
-            scope.parentId,
-            childStudentIds,
-          );
-        }
-
-        if (
-          scope.role ===
-            "teacher" &&
-          scope.teacherId
-        ) {
-          return this.recordMatchesTeacherWorkspace(
-            record,
-            scope.teacherId,
-          );
-        }
-
-        return true;
-      },
-    );
+    // Preserve the input's stable updatedAt/id order for cursor calculation.
+    const authorized = new Set([...roleScopedNonMedia, ...scopedMedia]);
+    return records.filter((record) => authorized.has(record));
   }
 
   private recordMatchesWorkspaceTenant(
@@ -2037,11 +2214,10 @@ export class SyncService {
     return {
       tableName:
         record.tableName,
+      // Invalid IDs are quarantined by validateStoredPullRecord; do not
+      // throw before the response can include quarantineRecords.
       localId:
-        this.requireLocalId(
-          record.localId,
-          record.tableName,
-        ),
+        this.cleanString(record.localId),
       cloudId:
         record.id,
       accountId:
@@ -2240,7 +2416,7 @@ export class SyncService {
 
       for (const row of rows) {
         const payload =
-          this.toPlain(row);
+          this.sanitizePlatformCachePayload(tableName, this.toPlain(row));
 
         records.push({
           tableName,
