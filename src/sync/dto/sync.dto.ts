@@ -105,6 +105,37 @@ export class PullSyncDto {
   @IsString()
   accountId?: string;
 
+  /** Explicit server-verified selected workspace membership. */
+  @IsOptional()
+  @IsString()
+  membershipId?: string;
+
+  /** Hints only; verified against the membership stored on the server. */
+  @IsOptional()
+  @IsString()
+  @IsIn(WORKSPACE_BOOTSTRAP_ROLES)
+  role?: WorkspaceBootstrapRole;
+
+  @IsOptional()
+  @IsString()
+  schoolId?: string;
+
+  @IsOptional()
+  @IsString()
+  branchId?: string;
+
+  @IsOptional()
+  @IsString()
+  teacherId?: string;
+
+  @IsOptional()
+  @IsString()
+  studentId?: string;
+
+  @IsOptional()
+  @IsString()
+  parentId?: string;
+
   @IsOptional()
   @IsString()
   deviceId?: string;

@@ -281,186 +281,263 @@ export class SyncService {
     return { ok: results.every((item) => item.ok), results, serverTime: Date.now() };
   }
 
+  /**
+   * Role- and membership-authorized incremental pull.
+   *
+   * A caller cannot upgrade itself by choosing another role or a table name.
+   * The active JWT user must own the selected, active membership. Scope and
+   * profile IDs are taken from that membership, not trusted from the request.
+   *
+   * Legacy clients that omit membershipId work ONLY if exactly one active
+   * membership exists. Multi-role clients must send membershipId explicitly.
+   *
+   * Since a number of relations (parent/child, teacher/media ownership) are
+   * stored in SyncRecord JSON, scoped pulls currently materialize the role's
+   * candidate dataset before filtering and paging. This is network-paginated,
+   * not database-streamed; indexed relationship tables will be needed to
+   * improve performance at large scale.
+   */
   async pull(actor: AuthUser, dto: PullSyncDto) {
     const accountId = this.requireActorAccount(actor, dto.accountId);
-
-    if (!accountId) {
-      return {
-        records: [],
-        serverTime: Date.now(),
-        hasMore: false,
-        nextCursor: null,
-        error: "Account session is missing. Please log out and sign in again.",
-      };
-    }
-
     await this.ensureAccount(accountId);
     await this.syncPolicy.assertCanPull(actor, accountId);
-    await this.touchDevice({
-      accountId,
-      deviceId: dto.deviceId,
-      lastPullAt: new Date(),
-    });
 
-    const requestedTables = Array.isArray(dto.tableNames)
-      ? dto.tableNames
-          .map((tableName) => this.cleanTableName(tableName))
-          .filter((tableName): tableName is string => Boolean(tableName))
-      : [];
+    if (!this.cleanString(actor.id)) {
+      throw new ForbiddenException("The authenticated user identity is missing.");
+    }
 
-    const allowedRequestedTables = requestedTables.filter((tableName) =>
-      LOCAL_FIRST_TABLES.has(tableName),
-    );
-
-    const tableFilter = allowedRequestedTables.length
-      ? { in: allowedRequestedTables }
-      : undefined;
-
-    const pageLimit = Math.min(
-      MAX_SYNC_PULL_LIMIT,
-      Math.max(
-        1,
-        Number(dto.limit || DEFAULT_SYNC_PULL_LIMIT),
-      ),
-    );
-
-    const cursor = this.resolvePullCursor(dto);
-
-    /**
-     * Fetch one extra row.
-     *
-     * The extra row is not returned. Its presence tells the client that a
-     * following page exists without requiring an additional count query.
-     */
-    const fetched = await this.prisma.syncRecord.findMany({
+    const membershipId = this.cleanId(dto.membershipId);
+    const memberships = await this.prisma.userMembership.findMany({
       where: {
         accountId,
-
-        ...(cursor
-          ? {
-              OR: [
-                {
-                  updatedAt: {
-                    gt: BigInt(cursor.updatedAt),
-                  },
-                },
-                {
-                  AND: [
-                    {
-                      updatedAt: BigInt(cursor.updatedAt),
-                    },
-                    {
-                      id: {
-                        gt: cursor.id,
-                      },
-                    },
-                  ],
-                },
-              ],
-            }
-          : dto.since
-            ? {
-                updatedAt: {
-                  gt: BigInt(Number(dto.since)),
-                },
-              }
-            : {}),
-
-        ...(tableFilter
-          ? {
-              tableName: tableFilter,
-            }
-          : {}),
+        userId: actor.id,
+        active: true,
+        status: "active",
+        ...(membershipId ? { id: membershipId } : {}),
       },
-
-      orderBy: [
-        {
-          updatedAt: "asc",
-        },
-        {
-          id: "asc",
-        },
-      ],
-
-      take: pageLimit + 1,
+      orderBy: { createdAt: "asc" },
+      take: membershipId ? 1 : 2,
     });
 
-    const hasMore = fetched.length > pageLimit;
-    const page = hasMore
-      ? fetched.slice(0, pageLimit)
-      : fetched;
+    if (!memberships.length) {
+      throw new ForbiddenException(
+        "The selected synchronization membership is unavailable or inactive.",
+      );
+    }
+    if (!membershipId && memberships.length !== 1) {
+      throw new ForbiddenException(
+        "Select an active workspace membership before synchronization.",
+      );
+    }
 
-    /**
-     * Advance the cursor across the complete stored page, including malformed
-     * rows. Malformed rows are returned separately for local syncQuarantine so
-     * they cannot block every later valid record forever.
-     */
-    const lastRecord = page.length
-      ? page[page.length - 1]
-      : null;
+    const membership = memberships[0];
+    const membershipRole = this.normalizeWorkspaceRole(membership.role);
+    const requestedRole = dto.role
+      ? this.normalizeWorkspaceRole(dto.role)
+      : membershipRole;
+    // Historical school-admin memberships may store role="admin".
+    // Using school_admin in that case is equivalent or narrower; other role
+    // substitutions are forbidden.
+    if (
+      requestedRole !== membershipRole &&
+      !(membershipRole === "admin" && requestedRole === "school_admin")
+    ) {
+      throw new ForbiddenException("The selected role does not match the membership.");
+    }
+    const role = requestedRole;
 
-    const nextCursor: SyncPullCursor | null = lastRecord
-      ? {
-          updatedAt: Number(lastRecord.updatedAt),
-          id: lastRecord.id,
-        }
-      : cursor;
+    const accountWide = ["developer", "platform_team", "super_admin"].includes(role);
+    const schoolId = this.cleanId(membership.schoolId);
+    const branchId = this.cleanId(membership.branchId);
+    const teacherId = this.cleanId(membership.teacherId);
+    const studentId = this.cleanId(membership.studentId);
+    const parentId = this.cleanId(membership.parentId);
 
-    const validRecords: any[] = [];
-    const quarantineRecords: any[] = [];
+    // A school/branch/profile-limited membership MUST carry its own stored
+    // scope. Never borrow another membership's scope or a client-supplied ID.
+    if (!accountWide && !schoolId) {
+      throw new ForbiddenException("The selected membership has no school scope.");
+    }
+    if (["branch_admin", "accountant", "teacher", "student", "parent"].includes(role) && !branchId) {
+      throw new ForbiddenException("The selected membership has no branch scope.");
+    }
+    if (role === "teacher" && !teacherId) {
+      throw new ForbiddenException("The teacher profile is not linked to this membership.");
+    }
+    if (role === "student" && !studentId) {
+      throw new ForbiddenException("The student profile is not linked to this membership.");
+    }
+    if (role === "parent" && !parentId) {
+      throw new ForbiddenException("The parent profile is not linked to this membership.");
+    }
 
-    for (const record of page) {
-      const integrity =
-        await this.validateStoredPullRecord(
-          actor,
-          record,
-          accountId,
+    for (const field of ["schoolId", "branchId", "teacherId", "studentId", "parentId"] as const) {
+      const requested = this.cleanId(dto[field]);
+      const assigned = this.cleanId(membership[field]);
+      // Account-wide members may use school/branch UI selectors without
+      // reducing their authorization. School admins may likewise select a
+      // branch within their school; this pull always uses their stored scope.
+      if (
+        requested && !accountWide &&
+        !(field === "branchId" && ["admin", "school_admin"].includes(role) && !assigned) &&
+        requested !== assigned
+      ) {
+        throw new ForbiddenException(
+          `The requested ${field} is outside this selected membership.`,
         );
+      }
+    }
 
-      const plainRecord = {
-        tableName: record.tableName,
-        localId: this.requireLocalId(
-          record.localId,
-          record.tableName,
-        ),
-        cloudId: record.id,
-        accountId: record.accountId,
-        deviceId:
-          record.deviceId ||
-          undefined,
-        version: record.version,
-        updatedAt:
-          Number(record.updatedAt),
-        isDeleted:
-          record.isDeleted,
-        payload: record.payload,
+    const roleTables = this.workspaceBootstrapTables(role).sort();
+    const allowedTables = new Set(roleTables);
+    const requestedTables = Array.isArray(dto.tableNames)
+      ? dto.tableNames.map((table) => this.cleanString(table))
+      : [];
+    if (requestedTables.some((table) => !table || !allowedTables.has(table))) {
+      throw new ForbiddenException(
+        "A requested synchronization table is not allowed for this membership.",
+      );
+    }
+    const tables = requestedTables.length
+      ? [...new Set(requestedTables as string[])].sort()
+      : roleTables;
+    const selectedTables = new Set(tables);
+
+    const pageLimit = Number(dto.limit ?? DEFAULT_SYNC_PULL_LIMIT);
+    if (!Number.isInteger(pageLimit) || pageLimit < 1 || pageLimit > MAX_SYNC_PULL_LIMIT) {
+      throw new BadRequestException(
+        `Synchronization limit must be between 1 and ${MAX_SYNC_PULL_LIMIT}.`,
+      );
+    }
+
+    const cursor = this.resolvePullCursor(dto);
+    const since = cursor ? 0 : Number(dto.since ?? 0);
+    if (!Number.isSafeInteger(since) || since < 0) {
+      throw new BadRequestException("Invalid synchronization since timestamp.");
+    }
+
+    let page: any[];
+    let hasMore: boolean;
+
+    if (accountWide) {
+      // Owner/platform memberships do not need relationship filtering. Keep
+      // their incremental pull on indexed, bounded Prisma queries instead of
+      // loading the account's complete record collection for every page.
+      const fetched = await this.prisma.syncRecord.findMany({
+        where: {
+          accountId,
+          tableName: { in: tables },
+          ...(cursor
+            ? {
+                OR: [
+                  { updatedAt: { gt: BigInt(cursor.updatedAt) } },
+                  {
+                    AND: [
+                      { updatedAt: BigInt(cursor.updatedAt) },
+                      { id: { gt: cursor.id } },
+                    ],
+                  },
+                ],
+              }
+            : since > 0
+              ? { updatedAt: { gt: BigInt(since) } }
+              : {}),
+        },
+        orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+        take: pageLimit + 1,
+      });
+      hasMore = fetched.length > pageLimit;
+      page = fetched.slice(0, pageLimit);
+    } else {
+      // Relationship-derived role filters require parent/student and media
+      // owner records even when they are outside the requested table subset.
+      const candidates = await this.prisma.syncRecord.findMany({
+        where: {
+          accountId,
+          tableName: { in: roleTables },
+        },
+        orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+      });
+
+      const scoped = this.filterWorkspaceBootstrapRecords(candidates, {
+        role, schoolId, branchId, teacherId, studentId, parentId,
+      });
+      const afterCursor = (record: any) => {
+        if (!cursor) return BigInt(record.updatedAt) > BigInt(since);
+        const updatedAt = BigInt(record.updatedAt);
+        const pivot = BigInt(cursor.updatedAt);
+        return updatedAt > pivot ||
+          (updatedAt === pivot && String(record.id) > cursor.id);
       };
 
+      // These cursors and page counts consider ONLY authorized records.
+      const eligible = scoped.filter((record) =>
+        selectedTables.has(record.tableName) && afterCursor(record),
+      );
+      hasMore = eligible.length > pageLimit;
+      page = eligible.slice(0, pageLimit);
+    }
+    const lastRecord = page.length ? page[page.length - 1] : null;
+    const nextCursor: SyncPullCursor | null = lastRecord
+      ? { updatedAt: Number(lastRecord.updatedAt), id: lastRecord.id }
+      : cursor;
+
+    const records: any[] = [];
+    const quarantineRecords: any[] = [];
+    for (const record of page) {
+      const integrity = await this.validateStoredPullRecord(
+        actor, record, accountId,
+      );
+      // Invalid UUIDs must be quarantined rather than throwing and blocking
+      // every later record. No unverified row is returned outside the scope.
+      const plain = this.toBootstrapPullRecord(record);
       if (integrity.ok) {
-        validRecords.push(
-          plainRecord,
-        );
+        records.push(plain);
       } else {
         quarantineRecords.push({
-          reason:
-            integrity.reason,
-          record:
-            plainRecord,
+          reason: integrity.reason || "INVALID_PULL_RECORD",
+          record: plain,
         });
       }
     }
 
+    // Detect a revocation that happens while the page is being assembled.
+    const stillActive = await this.prisma.userMembership.findFirst({
+      where: {
+        id: membership.id,
+        accountId,
+        userId: actor.id,
+        active: true,
+        status: "active",
+        updatedAt: membership.updatedAt,
+      },
+      select: { id: true },
+    });
+    if (!stillActive) {
+      throw new ForbiddenException(
+        "Workspace membership changed during synchronization. Select your role again.",
+      );
+    }
+
+    await this.touchDevice({
+      accountId,
+      userId: actor.id,
+      deviceId: dto.deviceId,
+      lastPullAt: new Date(),
+    });
+
     return {
-      records: validRecords,
+      records,
       quarantineRecords,
+      membershipId: membership.id,
+      role,
+      accountId,
       serverTime: Date.now(),
       hasMore,
       nextCursor,
       pageSize: page.length,
-      validPageSize:
-        validRecords.length,
-      quarantinedPageSize:
-        quarantineRecords.length,
+      validPageSize: records.length,
+      quarantinedPageSize: quarantineRecords.length,
       requestedLimit: pageLimit,
     };
   }
@@ -1573,6 +1650,7 @@ export class SyncService {
           accountId,
           userId: actor.id,
           active: true,
+          status: "active",
           ...(dto.membershipId
             ? {
                 id:
@@ -1839,6 +1917,7 @@ export class SyncService {
       for (const record of records) {
         if (
           record.tableName !== "studentParents" ||
+          record.isDeleted || record.payload?.isDeleted ||
           !this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId)
         ) continue;
         const payload = (record.payload || {}) as Record<string, any>;
