@@ -1,5 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash } from "node:crypto";
+import { Prisma } from "@prisma/client";
+import { AdmissionNumberService } from "../admissions/admission-number.service";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthUser } from "../common/auth-user";
 import { RealtimeEventsService } from "../realtime/realtime-events.service";
@@ -50,6 +52,8 @@ type SyncResult = {
   ok: boolean;
   error?: string;
   conflictId?: string;
+  admissionNumber?: string;
+  admissionNumberConfirmed?: boolean;
 };
 
 /**
@@ -128,6 +132,7 @@ export class SyncService {
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeEventsService,
     private readonly syncPolicy: SubscriptionSyncPolicyService,
+    private readonly admissionNumbers: AdmissionNumberService,
   ) {
     const registryIssues = validateSyncTableRegistry();
     if (registryIssues.length) {
@@ -250,6 +255,9 @@ export class SyncService {
           version: saved.version,
           updatedAt: Number(saved.updatedAt),
           ok: true,
+          ...(tableName === "students" && !saved.isDeleted
+            ? { admissionNumber: String((saved.payload as any)?.admissionNumber || "") || undefined, admissionNumberConfirmed: Boolean((saved.payload as any)?.admissionNumberConfirmed) }
+            : {}),
         });
 
         changedTables.add(tableName);
@@ -2619,7 +2627,170 @@ export class SyncService {
     });
   }
 
+  /**
+   * Student-only authoritative write path. Every other sync table retains its
+   * original upsert behaviour. Admission identity and SyncRecord are committed
+   * in one serializable transaction (including any legacy identity backfill).
+   */
+  private async upsertStudentWithAdmission(record: NormalizedSyncPushRecord) {
+    const accountId = this.cleanId(record.accountId);
+    const studentId = this.requireLocalId(record.localId, "students");
+    const schoolId = this.cleanId(record.payload?.schoolId);
+    const branchId = this.cleanId(record.payload?.branchId);
+    if (!accountId || !schoolId || !branchId) {
+      throw new BadRequestException("Student must have accountId, schoolId and branchId.");
+    }
+
+    // Retrying a SERIALIZABLE transaction must retry *all* its reads/writes.
+    let saved: any;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        saved = await this.prisma.$transaction(async (tx) => {
+          const existing = await tx.syncRecord.findFirst({
+            where: { accountId, tableName: "students", localId: studentId },
+            orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+          });
+          if (record.cloudId) {
+            const byCloud = await tx.syncRecord.findUnique({ where: { id: record.cloudId } });
+            if (byCloud && (byCloud.accountId !== accountId || byCloud.tableName !== "students" || byCloud.localId !== studentId)) {
+              throw new ForbiddenException("Student cloud identity does not match its permanent UUID.");
+            }
+          }
+          if (existing) {
+            const oldPayload = (existing.payload || {}) as Record<string, any>;
+            if (this.cleanId(oldPayload.schoolId) !== schoolId || this.cleanId(oldPayload.branchId) !== branchId) {
+              throw new BadRequestException("Moving a student to another branch requires a separate authorized transfer workflow.");
+            }
+            const incomingVersion = Number(record.version || 1);
+            const incomingUpdatedAt = Number(record.updatedAt || Date.now());
+            if (!(incomingVersion > existing.version || incomingUpdatedAt >= Number(existing.updatedAt))) {
+              // Preserve the accepted record; a stale write must not allocate a number.
+              return { ...existing, admissionStale: true };
+            }
+          }
+
+          // Register historical admissions before making any allocation. Never
+          // silently choose one if distinct student UUIDs share the same number.
+          // This also prevents new numbers from colliding with unbackfilled data.
+          const branchStudents = await tx.syncRecord.findMany({
+            where: { accountId, tableName: "students", isDeleted: false },
+            orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+          });
+          const deduped = new Map<string, Record<string, any>>();
+          for (const row of branchStudents) {
+            const p = (row.payload || {}) as Record<string, any>;
+            if (this.cleanId(p.schoolId) !== schoolId || this.cleanId(p.branchId) !== branchId) continue;
+            const id = this.cleanId(p.id || row.localId);
+            if (id && !deduped.has(id)) deduped.set(id, p);
+          }
+          for (const [id, p] of deduped) {
+            if (id === studentId) continue; // current student is processed below
+            const raw = String(p.admissionNumber ?? "").trim();
+            if (!raw) continue;
+            const norm = this.admissionNumbers.normalizeNumber(raw);
+            const matched = await tx.studentAdmissionIdentity.findUnique({
+              where: { accountId_studentId: { accountId, studentId: id } },
+            });
+            if (matched) {
+              if (matched.schoolId !== schoolId || matched.branchId !== branchId || matched.normalizedNumber !== norm) {
+                throw new BadRequestException("Historical admission identity conflict: reconciliation is required.");
+              }
+              continue;
+            }
+            await tx.studentAdmissionIdentity.create({
+              data: { accountId, schoolId, branchId, studentId: id, admissionNumber: raw, normalizedNumber: norm },
+            });
+          }
+
+          // Deletion does not release an assigned number for reuse.
+          if (record.isDeleted) {
+            const newPayload = { ...record.payload, accountId };
+            if (existing) return tx.syncRecord.update({
+              where: { id: existing.id },
+              data: { deviceId: record.deviceId || existing.deviceId, version: record.version, updatedAt: BigInt(record.updatedAt), isDeleted: true, payload: { ...newPayload, cloudId: existing.id } },
+            });
+            return tx.syncRecord.create({
+              data: { accountId, tableName: "students", localId: studentId, cloudId: record.cloudId || undefined, deviceId: record.deviceId || undefined, version: record.version, updatedAt: BigInt(record.updatedAt), isDeleted: true, payload: newPayload },
+            });
+          }
+
+          const settings = await tx.syncRecord.findMany({
+            where: { accountId, tableName: "schoolBranchSettings", isDeleted: false },
+            orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+          });
+          const settingsPayload = settings.map(s => (s.payload || {}) as Record<string, any>)
+            .find(p => this.cleanId(p.schoolId) === schoolId && this.cleanId(p.branchId) === branchId);
+          const config = this.admissionNumbers.normalizeConfig(settingsPayload?.admissionNumbers);
+          const oldNumber = String(((existing?.payload || {}) as any).admissionNumber || "").trim();
+          // Protect the already-issued number of the current student as legacy
+          // data, including when the branch has since switched to auto mode.
+          if (oldNumber) {
+            const registered = await tx.studentAdmissionIdentity.findUnique({
+              where: { accountId_studentId: { accountId, studentId } },
+            });
+            const norm = this.admissionNumbers.normalizeNumber(oldNumber);
+            if (!registered) {
+              await tx.studentAdmissionIdentity.create({
+                data: { accountId, schoolId, branchId, studentId,
+                  admissionNumber: oldNumber, normalizedNumber: norm },
+              });
+            } else if (registered.normalizedNumber !== norm || registered.schoolId !== schoolId || registered.branchId !== branchId) {
+              throw new BadRequestException("Existing student admission identity conflicts with the registry.");
+            }
+          }
+          const supplied = String(record.payload.admissionNumber || oldNumber || "").trim();
+          const provisional = config.mode === "automatic" ||
+            (config.mode === "automatic_or_manual" && record.payload.admissionNumberProvisional === true);
+          // In mixed mode, a provisional number is reassigned. In manual mode
+          // and for historical confirmed IDs, existing values are retained.
+          const assignment = await this.admissionNumbers.assignInTransaction(tx, {
+            accountId, schoolId, branchId, studentId, supplied,
+            provisionalAutomatic: provisional && !oldNumber,
+            config,
+          });
+          const payload = {
+            ...record.payload,
+            accountId,
+            id: studentId,
+            admissionNumber: assignment?.admissionNumber || supplied || undefined,
+            admissionNumberProvisional: false,
+            admissionNumberConfirmed: Boolean(assignment),
+          };
+          if (existing) {
+            return tx.syncRecord.update({
+              where: { id: existing.id },
+              data: { localId: studentId, cloudId: existing.id, deviceId: record.deviceId || existing.deviceId,
+                version: record.version, updatedAt: BigInt(record.updatedAt), isDeleted: false,
+                payload: { ...payload, cloudId: existing.id } },
+            });
+          }
+          const created = await tx.syncRecord.create({
+            data: { accountId, tableName: "students", localId: studentId,
+              deviceId: record.deviceId || undefined, version: record.version,
+              updatedAt: BigInt(record.updatedAt), isDeleted: false, payload },
+          });
+          return tx.syncRecord.update({
+            where: { id: created.id },
+            data: { cloudId: created.id, payload: { ...payload, cloudId: created.id } },
+          });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30000 });
+        break;
+      } catch (error: any) {
+        if ((error?.code === "P2034" || error?.code === "P2002") && attempt < 3) continue;
+        throw error;
+      }
+    }
+    if (!saved) throw new Error("Student admission transaction failed.");
+    if (saved.admissionStale) {
+      const conflict = await this.recordConflict({ existing: saved, incoming: record, reason: "version_conflict" });
+      return { ...saved, conflictId: conflict?.id };
+    }
+    await this.afterUpsertRecord(saved, record);
+    return saved;
+  }
+
   private async upsertRecord(record: NormalizedSyncPushRecord) {
+    if (record.tableName === "students") return this.upsertStudentWithAdmission(record);
     const accountId = this.cleanId(record.accountId);
 
     if (!accountId) {

@@ -16,6 +16,8 @@ import {
   SubscriptionSyncPolicyService,
 } from "./subscription-sync-policy.service";
 
+import { AdmissionNumberService } from "../admissions/admission-number.service";
+
 @Module({
   imports: [
     AuthModule,
@@ -24,9 +26,10 @@ import {
     SyncController,
   ],
   providers: [
-    SyncService,
-    SubscriptionSyncPolicyService,
-  ],
+  SyncService,
+  SubscriptionSyncPolicyService,
+  AdmissionNumberService,
+],
   exports: [
     SyncService,
     SubscriptionSyncPolicyService,
