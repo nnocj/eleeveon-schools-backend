@@ -2253,6 +2253,14 @@ export class SyncService {
         "classSubjects",
         "students",
         "studentEnrollments",
+        // Shared definitions/templates needed to render assigned-class reports.
+        // recordMatchesWorkspaceTenant() still limits their school/branch scope.
+        "academicStructures",
+        "gradingStructures",
+        "gradeRules",
+        "reportCardTemplates",
+        "reportCardTemplateSettings",
+        "reportCardTemplateAssignments",
         "assessmentStructures",
         "assessmentStructureItems",
         "assessmentApplicabilities",
