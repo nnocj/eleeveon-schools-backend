@@ -156,7 +156,7 @@ const WEBSITE_TABLES = [
 const TEACHER_TABLES = [
   // Shared academic definitions and printable report templates are required
   // for Teacher Reports. Membership and tenant filtering still apply.
-  "schools", "branches", "schoolBranchSettings", "academicPeriods", "classes", "subjects",
+  "schools", "branches","teachers", "schoolBranchSettings", "academicPeriods", "classes", "subjects",
   "academicStructures", "gradingStructures", "gradeRules",
   "reportCardTemplates", "reportCardTemplateSettings", "reportCardTemplateAssignments",
   "classSubjects", "classTeachers", "assignments", "students", "studentEnrollments",
