@@ -1,4 +1,4 @@
-/**
+8/**
  * src/sync/sync-table-registry.ts
  * --------------------------------------------------------------------------
  * Canonical backend synchronization registry.
@@ -158,6 +158,8 @@ const TEACHER_TABLES = [
   // for Teacher Reports. Membership and tenant filtering still apply.
   "schools", "branches","teachers", "schoolBranchSettings", "academicPeriods", "classes", "subjects",
   "academicStructures", "gradingStructures", "gradeRules",
+"reportCards",
+"reportCardItems",
   "reportCardTemplates", "reportCardTemplateSettings", "reportCardTemplateAssignments",
   "classSubjects", "classTeachers", "assignments", "students", "studentEnrollments",
   "assessmentStructures", "assessmentStructureItems", "assessmentApplicabilities",
