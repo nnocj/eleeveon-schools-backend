@@ -1,24 +1,12 @@
-8/**
+/**
  * src/sync/sync-table-registry.ts
- * --------------------------------------------------------------------------
  * Canonical backend synchronization registry.
- *
- * Keep table names aligned with app/lib/db/core/registry.ts. This file owns
- * backend transport behaviour; SyncService derives push, pull and bootstrap
- * decisions from these exports instead of maintaining independent lists.
+ * Teacher Reports fix: reportCards and reportCardItems included in TEACHER_TABLES.
  */
 
 export type WorkspaceBootstrapRole =
-  | "developer"
-  | "platform_team"
-  | "super_admin"
-  | "admin"
-  | "school_admin"
-  | "branch_admin"
-  | "teacher"
-  | "student"
-  | "parent"
-  | "accountant";
+  | "developer" | "platform_team" | "super_admin" | "admin" | "school_admin"
+  | "branch_admin" | "teacher" | "student" | "parent" | "accountant";
 
 export const WORKSPACE_BOOTSTRAP_SCHEMA_VERSION = 3 as const;
 
@@ -97,9 +85,7 @@ export const LOCAL_ONLY_TABLE_NAMES = [
 export const LOCAL_FIRST_TABLES = new Set<string>(LOCAL_FIRST_SYNC_TABLE_NAMES);
 export const PLATFORM_CACHE_TABLES = new Set<string>(PLATFORM_CACHE_TABLE_NAMES);
 export const BLOCKED_PUSH_TABLES = new Set<string>([
-  ...PLATFORM_CACHE_TABLE_NAMES,
-  ...BACKEND_ONLY_TABLE_NAMES,
-  ...LOCAL_ONLY_TABLE_NAMES,
+  ...PLATFORM_CACHE_TABLE_NAMES, ...BACKEND_ONLY_TABLE_NAMES, ...LOCAL_ONLY_TABLE_NAMES,
 ]);
 
 export const SCHOOL_REQUIRED_TABLES = new Set<string>([
@@ -154,13 +140,11 @@ const WEBSITE_TABLES = [
 ] as const;
 
 const TEACHER_TABLES = [
-  // Shared academic definitions and printable report templates are required
-  // for Teacher Reports. Membership and tenant filtering still apply.
-  "schools", "branches","teachers", "schoolBranchSettings", "academicPeriods", "classes", "subjects",
+  "schools", "branches", "teachers", "schoolBranchSettings", "academicPeriods", "classes", "subjects",
   "academicStructures", "gradingStructures", "gradeRules",
-"reportCards",
-"reportCardItems",
   "reportCardTemplates", "reportCardTemplateSettings", "reportCardTemplateAssignments",
+  // Teacher report cards now include the saved report-card and line-item data.
+  "reportCards", "reportCardItems",
   "classSubjects", "classTeachers", "assignments", "students", "studentEnrollments",
   "assessmentStructures", "assessmentStructureItems", "assessmentApplicabilities",
   "assessmentComponents", "assessmentEntries", "computedResults", "teacherAttendance",
