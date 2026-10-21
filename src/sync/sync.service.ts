@@ -65,6 +65,27 @@ type NormalizedSyncPushRecord = Omit<SyncPushRecordDto, "localId"> & {
   localId: string;
 };
 
+/** Membership-authorized scope, never selected from untrusted client IDs. */
+type WorkspaceReadScope = {
+  role: WorkspaceBootstrapRole;
+  schoolId?: string;
+  branchId?: string;
+  teacherId?: string;
+  studentId?: string;
+  parentId?: string;
+};
+
+/**
+ * Display fields permitted for colleagues sharing an assigned class.
+ * The source SyncRecord remains unchanged in PostgreSQL.
+ */
+const COLLEAGUE_TEACHER_DISPLAY_FIELDS = [
+  "id", "accountId", "schoolId", "branchId", "fullName", "displayName",
+  "name", "firstName", "middleName", "lastName", "surname",
+  "otherNames", "preferredName", "title", "prefix", "suffix",
+  "active", "isDeleted", "createdAt", "updatedAt", "version",
+] as const;
+
 /**
  * Browser-push allow-list for local-first Dexie tables.
  *
@@ -426,6 +447,9 @@ export class SyncService {
 
     let page: any[];
     let hasMore: boolean;
+    const readScope: WorkspaceReadScope = {
+      role, schoolId, branchId, teacherId, studentId, parentId,
+    };
 
     if (accountWide) {
       // Owner/platform memberships do not need relationship filtering. Keep
@@ -467,9 +491,10 @@ export class SyncService {
         orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
       });
 
-      const scoped = this.filterWorkspaceBootstrapRecords(candidates, {
+      const scope: WorkspaceReadScope = {
         role, schoolId, branchId, teacherId, studentId, parentId,
-      });
+      };
+      const scoped = this.filterWorkspaceBootstrapRecords(candidates, scope);
       const afterCursor = (record: any) => {
         if (!cursor) return BigInt(record.updatedAt) > BigInt(since);
         const updatedAt = BigInt(record.updatedAt);
@@ -498,14 +523,12 @@ export class SyncService {
       );
       // Invalid UUIDs must be quarantined rather than throwing and blocking
       // every later record. No unverified row is returned outside the scope.
-      const plain = this.toBootstrapPullRecord(record);
       if (integrity.ok) {
-        records.push(plain);
+        records.push(this.toBootstrapPullRecord(record, readScope));
       } else {
-        quarantineRecords.push({
-          reason: integrity.reason || "INVALID_PULL_RECORD",
-          record: plain,
-        });
+        quarantineRecords.push(this.toQuarantinePullRecord(
+          record, integrity.reason || "INVALID_PULL_RECORD", readScope,
+        ));
       }
     }
 
@@ -647,42 +670,26 @@ export class SyncService {
       parentId,
     });
 
-    const tables =
-      this.workspaceBootstrapTables(
-        role,
-        dto.tableNames,
-      );
+    const roleTables = this.workspaceBootstrapTables(role);
+    const tables = this.workspaceBootstrapTables(role, dto.tableNames);
+    const selectedTables = new Set(tables);
 
-    const fetched =
-      await this.prisma.syncRecord.findMany({
-        where: {
-          accountId,
-          tableName: {
-            in: tables,
-          },
-        },
-        orderBy: [
-          {
-            updatedAt: "asc",
-          },
-          {
-            id: "asc",
-          },
-        ],
-      });
+    // Teacher/parent relationships must be derived from the FULL role dataset.
+    // Fetching only a requested subset (for example, teachers) loses the
+    // classSubjects/classTeachers links needed to authorize those profiles.
+    const fetched = await this.prisma.syncRecord.findMany({
+      where: {
+        accountId,
+        tableName: { in: roleTables },
+      },
+      orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    });
 
-    const scoped =
-      this.filterWorkspaceBootstrapRecords(
-        fetched,
-        {
-          role,
-          schoolId,
-          branchId,
-          teacherId,
-          studentId,
-          parentId,
-        },
-      );
+    const readScope: WorkspaceReadScope = {
+      role, schoolId, branchId, teacherId, studentId, parentId,
+    };
+    const scoped = this.filterWorkspaceBootstrapRecords(fetched, readScope)
+      .filter((record) => selectedTables.has(record.tableName));
 
     const records: any[] = [];
     const quarantineRecords: any[] = [];
@@ -699,25 +706,15 @@ export class SyncService {
           accountId,
         );
 
-      const plain =
-        this.toBootstrapPullRecord(
-          record,
-        );
-
       if (integrity.ok) {
-        records.push(plain);
-        changedTables.add(
-          record.tableName,
-        );
+        records.push(this.toBootstrapPullRecord(record, readScope));
+        changedTables.add(record.tableName);
         tableCounts[record.tableName] =
           (tableCounts[record.tableName] || 0) + 1;
       } else {
-        quarantineRecords.push({
-          reason:
-            integrity.reason ||
-            "INVALID_BOOTSTRAP_RECORD",
-          record: plain,
-        });
+        quarantineRecords.push(this.toQuarantinePullRecord(
+          record, integrity.reason || "INVALID_BOOTSTRAP_RECORD", readScope,
+        ));
       }
     }
 
@@ -872,7 +869,7 @@ export class SyncService {
       orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
     });
 
-    const scope = {
+    const scope: WorkspaceReadScope = {
       role, schoolId, branchId, teacherId, studentId, parentId,
     };
     const roleScoped = this.filterWorkspaceBootstrapRecords(candidates, scope);
@@ -960,26 +957,15 @@ export class SyncService {
         actor, record, accountId,
       );
       // Never throw for invalid UUIDs before quarantining them.
-      const plain = {
-        tableName: record.tableName,
-        localId: this.cleanString(record.localId),
-        cloudId: record.id,
-        accountId: record.accountId,
-        deviceId: record.deviceId || undefined,
-        version: record.version,
-        updatedAt: Number(record.updatedAt),
-        isDeleted: record.isDeleted,
-        payload: record.payload,
-      };
       if (integrity.ok) {
-        records.push(plain);
+        records.push(this.toBootstrapPullRecord(record, scope));
         changedTables.add(record.tableName);
-        tableCounts[record.tableName] = (tableCounts[record.tableName] || 0) + 1;
+        tableCounts[record.tableName] =
+          (tableCounts[record.tableName] || 0) + 1;
       } else {
-        quarantineRecords.push({
-          reason: integrity.reason || "INVALID_BOOTSTRAP_RECORD",
-          record: plain,
-        });
+        quarantineRecords.push(this.toQuarantinePullRecord(
+          record, integrity.reason || "INVALID_BOOTSTRAP_RECORD", scope,
+        ));
       }
     }
 
@@ -1908,26 +1894,21 @@ export class SyncService {
 
   private filterWorkspaceBootstrapRecords(
     records: any[],
-    scope: {
-      role: WorkspaceBootstrapRole;
-      schoolId?: string;
-      branchId?: string;
-      teacherId?: string;
-      studentId?: string;
-      parentId?: string;
-    },
+    scope: WorkspaceReadScope,
   ) {
-    // Build parent-child authorization from tenant-scoped parent links.
-    // Relationship data is needed even when the requested page is for a
-    // completely different table, such as assessmentScores or mediaAssets.
+    const tenantMatches = (record: any): boolean =>
+      this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId);
+    const live = (record: any): boolean =>
+      !record.isDeleted && record.payload?.isDeleted !== true &&
+      record.payload?.active !== false && tenantMatches(record);
+    const recordId = (record: any): string | undefined =>
+      this.cleanId(record.payload?.id || record.localId);
+
+    // Preserve existing parent-child authorization.
     const childStudentIds = new Set<string>();
     if (scope.role === "parent" && scope.parentId) {
       for (const record of records) {
-        if (
-          record.tableName !== "studentParents" ||
-          record.isDeleted || record.payload?.isDeleted ||
-          !this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId)
-        ) continue;
+        if (record.tableName !== "studentParents" || !live(record)) continue;
         const payload = (record.payload || {}) as Record<string, any>;
         if (this.cleanId(payload.parentId) === scope.parentId) {
           const id = this.cleanId(payload.studentId);
@@ -1936,52 +1917,122 @@ export class SyncService {
       }
     }
 
+    // Class permissions come from stored, active tenant-scoped assignments,
+    // NOT a client-provided class list or the frontend's filter selection.
+    const assignedClassIds = new Set<string>();
+    const enrolledStudentIds = new Set<string>();
+    const assignedClassSubjectIds = new Set<string>();
+    const visibleTeacherIds = new Set<string>();
+    const visibleReportCardIds = new Set<string>();
+
+    if (scope.role === "teacher" && scope.teacherId) {
+      visibleTeacherIds.add(scope.teacherId);
+
+      // Pass 1: determine which classes the logged-in teacher is assigned.
+      for (const record of records) {
+        if (!live(record) ||
+            (record.tableName !== "classTeachers" &&
+             record.tableName !== "classSubjects")) continue;
+        const p = record.payload || {};
+        if (this.cleanId(p.teacherId) === scope.teacherId) {
+          const classId = this.cleanId(p.classId);
+          if (classId) assignedClassIds.add(classId);
+        }
+      }
+
+      // Pass 2: find other subject teachers and student enrollment records
+      // related to those classes. Names are only returned for such colleagues.
+      for (const record of records) {
+        if (!live(record)) continue;
+        const p = record.payload || {};
+        const classId = this.cleanId(p.classId);
+        if (!classId || !assignedClassIds.has(classId)) continue;
+
+        if (record.tableName === "classTeachers" ||
+            record.tableName === "classSubjects") {
+          const colleagueId = this.cleanId(p.teacherId);
+          if (colleagueId) visibleTeacherIds.add(colleagueId);
+          if (record.tableName === "classSubjects") {
+            const id = recordId(record);
+            if (id) assignedClassSubjectIds.add(id);
+          }
+        }
+        if (record.tableName === "studentEnrollments" &&
+            p.status === "active") {
+          const studentId = this.cleanId(p.studentId);
+          if (studentId) enrolledStudentIds.add(studentId);
+        }
+      }
+
+      // Pass 3: report items can be authorized through their reportCardId.
+      for (const record of records) {
+        if (!live(record) || record.tableName !== "reportCards") continue;
+        const p = record.payload || {};
+        const classId = this.cleanId(p.classId);
+        const studentId = this.cleanId(p.studentId);
+        const allowedByClass = Boolean(classId && assignedClassIds.has(classId));
+        const allowedByStudent = Boolean(
+          studentId && enrolledStudentIds.has(studentId) &&
+          (!classId || assignedClassIds.has(classId)),
+        );
+        if (allowedByClass || allowedByStudent) {
+          const id = recordId(record);
+          if (id) visibleReportCardIds.add(id);
+        }
+      }
+    }
+
     const roleScopedNonMedia = records.filter((record) => {
       if (record.tableName === "mediaAssets") return false;
-      if (!this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId)) {
-        return false;
-      }
+      if (!tenantMatches(record)) return false;
       if (scope.role === "student" && scope.studentId) {
         return this.recordMatchesStudentWorkspace(record, scope.studentId);
       }
       if (scope.role === "parent" && scope.parentId) {
         return this.recordMatchesParentWorkspace(record, scope.parentId, childStudentIds);
       }
-      if (scope.role === "teacher" && scope.teacherId) {
-        return this.recordMatchesTeacherWorkspace(record, scope.teacherId);
+      if (scope.role === "teacher") {
+        if (!scope.teacherId) return false;
+        return this.recordMatchesTeacherWorkspace(record, scope.teacherId, {
+          assignedClassIds,
+          enrolledStudentIds,
+          assignedClassSubjectIds,
+          visibleTeacherIds,
+          visibleReportCardIds,
+        });
       }
       return true;
     });
 
-    // A media asset may be returned only if its owner survived BOTH role and
-    // tenant scope checks. The previous tenant-only owner list could include
-    // records outside a student/parent's selected profile scope.
+    // An asset is visible only if its owner record is authorized.
     const allowedOwnerIds = new Map<string, Set<string>>();
     for (const record of roleScopedNonMedia) {
-      const id = this.cleanId(record.payload?.id || record.localId);
+      const id = recordId(record);
       if (!id) continue;
-      const owned = allowedOwnerIds.get(record.tableName) || new Set<string>();
-      owned.add(id);
-      allowedOwnerIds.set(record.tableName, owned);
+      const ids = allowedOwnerIds.get(record.tableName) || new Set<string>();
+      ids.add(id);
+      allowedOwnerIds.set(record.tableName, ids);
     }
 
     const profileScoped = ["student", "parent", "teacher"].includes(scope.role);
     const scopedMedia = records.filter((record) => {
-      if (record.tableName !== "mediaAssets") return false;
-      const payload = (record.payload || {}) as Record<string, any>;
-      if (!this.recordMatchesWorkspaceTenant(record, scope.schoolId, scope.branchId)) {
-        return false;
-      }
-      const ownerTable = this.cleanString(payload.ownerTable);
-      const ownerId = this.cleanId(payload.ownerId);
+      if (record.tableName !== "mediaAssets" || !tenantMatches(record)) return false;
+      const p = (record.payload || {}) as Record<string, any>;
+      const ownerTable = this.cleanString(p.ownerTable);
+      const ownerId = this.cleanId(p.ownerId);
+
+      // Name-only colleague profiles must NEVER cause their private media
+      // (contracts, signatures, documents, photos) to be downloaded.
+      if (scope.role === "teacher" && ownerTable === "teachers" &&
+          ownerId !== scope.teacherId) return false;
+
       if (ownerTable && ownerId) {
         return Boolean(allowedOwnerIds.get(ownerTable)?.has(ownerId));
       }
-      // Unowned assets cannot be safely attributed to a profile.
       return !profileScoped;
     });
 
-    // Preserve the input's stable updatedAt/id order for cursor calculation.
+    // Keep stable record order for pagination.
     const authorized = new Set([...roleScopedNonMedia, ...scopedMedia]);
     return records.filter((record) => authorized.has(record));
   }
@@ -2241,96 +2292,143 @@ export class SyncService {
   private recordMatchesTeacherWorkspace(
     record: any,
     teacherId: string,
+    access: {
+      assignedClassIds: Set<string>;
+      enrolledStudentIds: Set<string>;
+      assignedClassSubjectIds: Set<string>;
+      visibleTeacherIds: Set<string>;
+      visibleReportCardIds: Set<string>;
+    },
   ) {
-    const sharedTables =
-      new Set([
-        "schools",
-        "branches",
-        "schoolBranchSettings",
-        "academicPeriods",
-        "classes",
-        "subjects",
-        "classSubjects",
-        "students",
-        "studentEnrollments",
-        // Shared definitions/templates needed to render assigned-class reports.
-        // recordMatchesWorkspaceTenant() still limits their school/branch scope.
-        "academicStructures",
-        "gradingStructures",
-        "gradeRules",
-        "reportCardTemplates",
-        "reportCardTemplateSettings",
-        "reportCardTemplateAssignments",
-        "assessmentStructures",
-        "assessmentStructureItems",
-        "assessmentApplicabilities",
-        "identityDevices",
-        "identityAccessPoints",
-        "emergencyRollCallSessions",
-      ]);
+    const {
+      assignedClassIds, enrolledStudentIds, assignedClassSubjectIds,
+      visibleTeacherIds, visibleReportCardIds,
+    } = access;
+    const p = (record.payload || {}) as Record<string, any>;
+    const table = record.tableName;
+    const id = this.cleanId(p.id || record.localId);
+    const classId = this.cleanId(p.classId);
+    const studentId = this.cleanId(p.studentId);
+    const classSubjectId = this.cleanId(p.classSubjectId);
+    const linkedTeacherId = this.cleanId(p.teacherId);
 
-    if (
-      sharedTables.has(
-        record.tableName,
-      )
-    ) {
-      return true;
+    if (table === "teachers") return Boolean(id && visibleTeacherIds.has(id));
+    if (table === "classes") return Boolean(id && assignedClassIds.has(id));
+    if (table === "classTeachers" || table === "classSubjects") {
+      return Boolean(classId && assignedClassIds.has(classId));
+    }
+    if (table === "students") return Boolean(id && enrolledStudentIds.has(id));
+    if (table === "studentEnrollments") {
+      return Boolean(classId && assignedClassIds.has(classId));
+    }
+    if (table === "reportCards") return Boolean(id && visibleReportCardIds.has(id));
+    if (table === "reportCardItems") {
+      const reportCardId = this.cleanId(p.reportCardId);
+      if (reportCardId) return visibleReportCardIds.has(reportCardId);
+      // Legacy report items sometimes carry class/student instead of card ID.
+      return Boolean(
+        (classId && assignedClassIds.has(classId)) ||
+        (studentId && enrolledStudentIds.has(studentId) &&
+         (!classId || assignedClassIds.has(classId))),
+      );
     }
 
-    const payload =
-      (record.payload || {}) as Record<
-        string,
-        any
-      >;
-
-    if (
-      this.cleanId(payload.teacherId) === teacherId
-    ) {
+    // The full class report includes scores entered by OTHER subject teachers.
+    // Check every supplied relationship; never accept an unrelated class.
+    if (["assessmentEntries", "computedResults", "assessmentComponents",
+         "attendance", "studentAttendanceSummaries"].includes(table)) {
+      if (classId && !assignedClassIds.has(classId)) return false;
+      if (studentId && !enrolledStudentIds.has(studentId)) return false;
+      if (classSubjectId && !assignedClassSubjectIds.has(classSubjectId)) return false;
+      return Boolean(classId || studentId || classSubjectId);
+    }
+    if (table === "assessmentApplicabilities") {
+      if (classId && !assignedClassIds.has(classId)) return false;
+      if (classSubjectId && !assignedClassSubjectIds.has(classSubjectId)) return false;
       return true;
     }
+    if (table === "teacherAttendance") return linkedTeacherId === teacherId;
 
-    const subjectId = this.cleanId(
-      payload.subjectId || payload.personId,
-    );
+    // Definitions/templates are shared within the scoped school or branch.
+    const sharedDefinitions = new Set([
+      "schools", "branches", "schoolBranchSettings", "academicPeriods",
+      "subjects", "academicStructures", "gradingStructures", "gradeRules",
+      "reportCardTemplates", "reportCardTemplateSettings",
+      "reportCardTemplateAssignments", "assessmentStructures",
+      "assessmentStructureItems", "identityDevices", "identityAccessPoints",
+      "emergencyRollCallSessions",
+    ]);
+    if (sharedDefinitions.has(table)) return true;
 
-    const subjectType = String(
-      payload.subjectType || payload.personType || "",
-    ).toLowerCase();
+    // Other existing teacher-associated records remain available ONLY if
+    // their explicit class/student/subject linkage is also authorized.
+    if (classId && !assignedClassIds.has(classId)) return false;
+    if (studentId && !enrolledStudentIds.has(studentId)) return false;
+    if (classSubjectId && !assignedClassSubjectIds.has(classSubjectId)) return false;
+    if (linkedTeacherId === teacherId) return true;
 
-    return (
-      subjectId === teacherId &&
-      ["teacher", "staff"].includes(subjectType)
-    );
+    const subjectId = this.cleanId(p.subjectId || p.personId);
+    const subjectType = String(p.subjectType || p.personType || "").toLowerCase();
+    return subjectId === teacherId && ["teacher", "staff"].includes(subjectType);
   }
 
+  /**
+   * All read endpoints use this projection. Never return the full colleague
+   * teacher profile to a different teacher membership.
+   */
   private toBootstrapPullRecord(
     record: any,
+    scope?: WorkspaceReadScope,
   ) {
+    let payload = record.payload;
+    let deviceId = record.deviceId || undefined;
+
+    if (scope?.role === "teacher" && record.tableName === "teachers") {
+      const original = (record.payload || {}) as Record<string, any>;
+      const id = this.cleanId(original.id || record.localId);
+      if (id !== scope.teacherId) {
+        const display: Record<string, any> = {};
+        for (const field of COLLEAGUE_TEACHER_DISPLAY_FIELDS) {
+          if (original[field] !== undefined) display[field] = original[field];
+        }
+        display.id = id;
+        payload = display;
+        deviceId = undefined;
+      }
+    }
+
     return {
-      tableName:
-        record.tableName,
-      // Invalid IDs are quarantined by validateStoredPullRecord; do not
-      // throw before the response can include quarantineRecords.
-      localId:
-        this.cleanString(record.localId),
-      cloudId:
-        record.id,
-      accountId:
-        record.accountId,
-      deviceId:
-        record.deviceId ||
-        undefined,
-      version:
-        record.version,
-      updatedAt:
-        Number(
-          record.updatedAt,
-        ),
-      isDeleted:
-        record.isDeleted,
-      payload:
-        record.payload,
+      tableName: record.tableName,
+      localId: this.cleanString(record.localId),
+      cloudId: record.id,
+      accountId: record.accountId,
+      deviceId,
+      version: record.version,
+      updatedAt: Number(record.updatedAt),
+      isDeleted: record.isDeleted,
+      payload,
     };
+  }
+
+  /** Invalid records cannot bypass teacher-profile projection in quarantine. */
+  private toQuarantinePullRecord(
+    record: any,
+    reason: string,
+    scope?: WorkspaceReadScope,
+  ) {
+    if (scope?.role === "teacher") {
+      return {
+        reason,
+        record: {
+          tableName: record.tableName,
+          localId: this.cleanString(record.localId),
+          cloudId: record.id,
+          accountId: record.accountId,
+          isDeleted: Boolean(record.isDeleted),
+        },
+      };
+    }
+    return { reason, record: this.toBootstrapPullRecord(record, scope) };
   }
 
   private buildWorkspaceSummary(
