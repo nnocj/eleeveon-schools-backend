@@ -2119,3 +2119,54 @@ model StudentAdmissionIdentity {
   @@unique([accountId, schoolId, branchId, normalizedNumber])
   @@index([accountId, schoolId, branchId])
 }
+
+model IdentityCardRegistry {
+  id           String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  publicId     String   @unique @default(dbgenerated("gen_random_uuid()::text"))
+  accountId    String
+  schoolId     String
+  branchId     String
+  subjectType  String
+  subjectId    String
+  status       String   @default("active")
+  issuedAt     DateTime @default(now()) @db.Timestamptz(3)
+  expiresAt    DateTime? @db.Timestamptz(3)
+  revokedAt    DateTime? @db.Timestamptz(3)
+  replacedAt   DateTime? @db.Timestamptz(3)
+  version      Int      @default(1)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+  events       IdentityCardRegistryEvent[]
+
+  @@unique([accountId, subjectType, subjectId])
+  @@index([schoolId, branchId, subjectType, status])
+}
+
+model IdentityCardRegistryEvent {
+  id          String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  cardId      String
+  accountId   String
+  eventType   String
+  performedBy String?
+  occurredAt  DateTime @default(now()) @db.Timestamptz(3)
+  note        String?
+  card        IdentityCardRegistry @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@index([cardId, occurredAt])
+}
+
+model IdentityIssuancePolicy {
+  id               String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  accountId        String
+  schoolId         String
+  branchId         String
+  studentMode      String   @default("manual")
+  teacherMode      String   @default("manual")
+  expiryMonths     Int      @default(12)
+  showClassPublicly Boolean @default(true)
+  showNamePublicly  Boolean @default(false)
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([accountId, schoolId, branchId])
+}
