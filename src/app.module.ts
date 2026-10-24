@@ -14,6 +14,7 @@ import { PrismaModule } from "./prisma/prisma.module";
 import { PublicWebsitesModule } from "./public-websites/public-websites.module";
 import { RealtimeModule } from "./realtime/realtime.module";
 import { SyncModule } from "./sync/sync.module";
+import { IdentityModule } from "./identity/identity.module";
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { SyncModule } from "./sync/sync.module";
     MediaModule,
     SyncModule,
     PublicWebsitesModule,
+    IdentityModule,
   ],
 })
 export class AppModule {}
