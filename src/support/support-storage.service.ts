@@ -71,6 +71,16 @@ export class SupportStorageService {
     return { name, mimeType, sizeBytes: file.buffer.length, storageKey, kind };
   }
 
+  /** Best-effort cleanup after a failed attachment-message database write. */
+  async remove(attachment: SupportAttachment): Promise<void> {
+    try {
+      const { error } = await this.storage.storage.from(this.bucket).remove([attachment.storageKey]);
+      if (error) console.warn("[support] Could not clean up failed attachment upload:", error.message);
+    } catch (error) {
+      console.warn("[support] Attachment cleanup failed:", error);
+    }
+  }
+
   async signedUrl(attachment: SupportAttachment): Promise<string | null> {
     const { data, error } = await this.storage.storage.from(this.bucket).createSignedUrl(
       attachment.storageKey, 600,
