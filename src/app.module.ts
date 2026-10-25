@@ -15,28 +15,13 @@ import { PublicWebsitesModule } from "./public-websites/public-websites.module";
 import { RealtimeModule } from "./realtime/realtime.module";
 import { SyncModule } from "./sync/sync.module";
 import { IdentityModule } from "./identity/identity.module";
+import { SupportModule } from "./support/support.module";
 
-@Module({
-  imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-    }),
-
-    EntitlementsModule,
-    PrismaModule,
-    RealtimeModule,
-    AuthModule,
-    AccountsModule,
-    MembershipsModule,
-    BillingModule,
-    FinanceModule,
-    PaymentGatewayModule,
-    PayrollModule,
-    PermissionsModule,
-    MediaModule,
-    SyncModule,
-    PublicWebsitesModule,
-    IdentityModule,
-  ],
-})
+@Module({ imports: [
+  ConfigModule.forRoot({ isGlobal: true }),
+  EntitlementsModule, PrismaModule, RealtimeModule, AuthModule, AccountsModule,
+  MembershipsModule, BillingModule, FinanceModule, PaymentGatewayModule,
+  PayrollModule, PermissionsModule, MediaModule, SyncModule, PublicWebsitesModule,
+  IdentityModule, SupportModule,
+] })
 export class AppModule {}
