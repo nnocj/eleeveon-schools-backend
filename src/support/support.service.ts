@@ -17,7 +17,7 @@ export class SupportService {
   constructor(private readonly prisma: PrismaService, private readonly storage: SupportStorageService) {}
 
   /** Derive platform privileges from an active database membership, not client flags. */
-  private async authorize(actor: AuthUser): Promise<{ accountId: string; userId: string; platform: boolean }> {
+  private async authorize(actor: AuthUser): Promise<{ accountId: string; userId: string; platform: boolean; platformConfigured: boolean; platformAccountMatches: boolean; canSeeAccount: boolean }> {
     const accountId = text(actor?.accountId, 120);
     const userId = text(actor?.id, 120);
     if (!accountId || !userId) throw new ForbiddenException("An authenticated account and user are required.");
@@ -26,17 +26,36 @@ export class SupportService {
       select: { id: true },
     });
     if (!membership) throw new ForbiddenException("An active membership is required to use Eleeveon Center.");
-    const platformMembership = await this.prisma.userMembership.findFirst({
-      where: { accountId, userId, active: true, status: "active", role: { in: ["developer", "platform_team"] } },
+    // Cross-school support access must be anchored to the real Eleeveon platform
+    // account. A 'developer' membership in some other account is NOT sufficient.
+    // Account administrators may see their school's support conversations;
+    // regular teachers and other members see only conversations they began.
+    const adminMembership = await this.prisma.userMembership.findFirst({
+      where: { accountId, userId, active: true, status: "active",
+        role: { in: ["owner", "super_admin", "admin"] } },
       select: { id: true },
     });
-    return { accountId, userId, platform: Boolean(platformMembership) };
+    const platformAccountId = text(process.env.ELEEVEON_PLATFORM_ACCOUNT_ID, 120);
+    const platformAccountMatches = Boolean(platformAccountId && platformAccountId === accountId);
+    const platformMembership = platformAccountMatches
+      ? await this.prisma.userMembership.findFirst({
+          where: { accountId: platformAccountId, userId, active: true, status: "active",
+            role: { in: ["developer", "platform_team"] } },
+          select: { id: true },
+        })
+      : null;
+    return { accountId, userId, platform: Boolean(platformMembership),
+      platformConfigured: Boolean(platformAccountId), platformAccountMatches,
+      canSeeAccount: Boolean(adminMembership) };
   }
 
   private async accessibleConversation(actor: AuthUser, feedbackId: string) {
     const access = await this.authorize(actor);
     const conversation = await this.prisma.platformFeedback.findFirst({
-      where: { id: feedbackId, ...(access.platform ? {} : { accountId: access.accountId }) },
+      where: { id: feedbackId, ...(access.platform ? {} : {
+        accountId: access.accountId,
+        ...(!access.canSeeAccount ? { submittedByUserId: access.userId } : {}),
+      }) },
       include: { account: { select: { name: true } } },
     });
     if (!conversation) throw new NotFoundException("Support conversation not found.");
@@ -46,7 +65,10 @@ export class SupportService {
   async list(actor: AuthUser) {
     const access = await this.authorize(actor);
     const rows = await this.prisma.platformFeedback.findMany({
-      where: access.platform ? {} : { accountId: access.accountId },
+      where: access.platform ? {} : {
+        accountId: access.accountId,
+        ...(!access.canSeeAccount ? { submittedByUserId: access.userId } : {}),
+      },
       include: {
         account: { select: { name: true } },
         messages: { where: { internal: false }, orderBy: { createdAt: "desc" }, take: 1 },
@@ -54,9 +76,22 @@ export class SupportService {
       orderBy: { updatedAt: "desc" },
       take: 300,
     });
-    return { conversations: rows.map(({ messages, account, ...row }) => ({
-      ...row, organizationName: account?.name || "School", lastMessage: messages[0] ? { body: messages[0].body, createdAt: messages[0].createdAt, authorType: messages[0].authorType } : null,
-    })) };
+    return {
+      conversations: rows.map(({ messages, account, ...row }) => ({
+        ...row, organizationName: account?.name || "School",
+        lastMessage: messages[0]
+          ? { body: messages[0].body, createdAt: messages[0].createdAt, authorType: messages[0].authorType }
+          : null,
+      })),
+      // Show the actual server-authorized inbox scope in the UI. This prevents
+      // a developer screen from quietly presenting an empty account-only inbox.
+      meta: {
+        inboxScope: access.platform ? "platform" : "account",
+        platformConfigured: access.platformConfigured,
+        platformAccountMatches: access.platformAccountMatches,
+        conversationCount: rows.length,
+      },
+    };
   }
 
   async open(actor: AuthUser, feedbackId: string) {
@@ -131,15 +166,35 @@ export class SupportService {
         return { message: { ...existing, attachments: await this.expose(existing.attachments) } };
       }
     }
-    let attachment: SupportAttachment | null = null;
-    if (file?.buffer?.length) attachment = await this.storage.store(conversation.accountId || access.accountId, feedbackId, file);
-    const created = await this.prisma.platformFeedbackMessage.create({
+    // Create the database message FIRST. In the previous flow an attachment
+    // could reach Supabase even when Prisma rejected message creation,
+    // producing an orphaned upload with nothing in the support inbox.
+    let created = await this.prisma.platformFeedbackMessage.create({
       data: {
         ...(clientId ? { id: clientId } : {}),
-        feedbackId, authorType: access.platform ? "platform" : "school", authorUserId: access.userId,
-        body, attachments: attachment ? [{ ...attachment }] : undefined, internal: false,
+        feedbackId, authorType: access.platform ? "platform" : "school",
+        authorUserId: access.userId, body, internal: false,
       },
     });
+    if (file?.buffer?.length) {
+      let attachment: SupportAttachment | null = null;
+      try {
+        attachment = await this.storage.store(
+          conversation.accountId || access.accountId, feedbackId, file,
+        );
+        created = await this.prisma.platformFeedbackMessage.update({
+          where: { id: created.id },
+          data: { attachments: [{ ...attachment }] },
+        });
+      } catch (error) {
+        // Best-effort rollback on upload/finalization failures. In particular,
+        // keep inaccessible partial messages out of the conversation thread.
+        if (attachment) await this.storage.remove(attachment);
+        await this.prisma.platformFeedbackMessage.delete({ where: { id: created.id } })
+          .catch(() => undefined);
+        throw error;
+      }
+    }
     await this.prisma.platformFeedback.update({
       where: { id: feedbackId },
       data: access.platform && conversation.status === "submitted" ? { status: "acknowledged" } :
