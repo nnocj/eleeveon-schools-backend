@@ -3,10 +3,6 @@ import { PrismaModule } from "../prisma/prisma.module";
 import { SupportController } from "./support.controller";
 import { SupportService } from "./support.service";
 import { SupportStorageService } from "./support-storage.service";
-
-@Module({
-  imports: [PrismaModule],
-  controllers: [SupportController],
-  providers: [SupportService, SupportStorageService],
-})
-export class SupportModule {}
+import { SupportSurveysService } from "./support-surveys.service";
+import { SupportLiveService } from "./support-live.service";
+@Module({imports:[PrismaModule],controllers:[SupportController],providers:[SupportService,SupportStorageService,SupportSurveysService,SupportLiveService]}) export class SupportModule {}
