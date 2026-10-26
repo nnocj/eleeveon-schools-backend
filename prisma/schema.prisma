@@ -2121,34 +2121,34 @@ model StudentAdmissionIdentity {
 }
 
 model IdentityCardRegistry {
-  id           String   @id @default(dbgenerated("gen_random_uuid()::text"))
-  publicId     String   @unique @default(dbgenerated("gen_random_uuid()::text"))
-  accountId    String
-  schoolId     String
-  branchId     String
-  subjectType  String
-  subjectId    String
-  status       String   @default("active")
-  issuedAt     DateTime @default(now()) @db.Timestamptz(3)
-  expiresAt    DateTime? @db.Timestamptz(3)
-  revokedAt    DateTime? @db.Timestamptz(3)
-  replacedAt   DateTime? @db.Timestamptz(3)
-  version      Int      @default(1)
-  createdAt    DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
-  events       IdentityCardRegistryEvent[]
+  id          String                      @id @default(dbgenerated("gen_random_uuid()::text"))
+  publicId    String                      @unique @default(dbgenerated("gen_random_uuid()::text"))
+  accountId   String
+  schoolId    String
+  branchId    String
+  subjectType String
+  subjectId   String
+  status      String                      @default("active")
+  issuedAt    DateTime                    @default(now()) @db.Timestamptz(3)
+  expiresAt   DateTime?                   @db.Timestamptz(3)
+  revokedAt   DateTime?                   @db.Timestamptz(3)
+  replacedAt  DateTime?                   @db.Timestamptz(3)
+  version     Int                         @default(1)
+  createdAt   DateTime                    @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime                    @updatedAt @db.Timestamptz(3)
+  events      IdentityCardRegistryEvent[]
 
   @@unique([accountId, subjectType, subjectId])
   @@index([schoolId, branchId, subjectType, status])
 }
 
 model IdentityCardRegistryEvent {
-  id          String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  id          String               @id @default(dbgenerated("gen_random_uuid()::text"))
   cardId      String
   accountId   String
   eventType   String
   performedBy String?
-  occurredAt  DateTime @default(now()) @db.Timestamptz(3)
+  occurredAt  DateTime             @default(now()) @db.Timestamptz(3)
   note        String?
   card        IdentityCardRegistry @relation(fields: [cardId], references: [id], onDelete: Cascade)
 
@@ -2156,20 +2156,21 @@ model IdentityCardRegistryEvent {
 }
 
 model IdentityIssuancePolicy {
-  id               String   @id @default(dbgenerated("gen_random_uuid()::text"))
-  accountId        String
-  schoolId         String
-  branchId         String
-  studentMode      String   @default("manual")
-  teacherMode      String   @default("manual")
-  expiryMonths     Int      @default(12)
-  showClassPublicly Boolean @default(true)
-  showNamePublicly  Boolean @default(false)
-  createdAt        DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+  id                String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  accountId         String
+  schoolId          String
+  branchId          String
+  studentMode       String   @default("manual")
+  teacherMode       String   @default("manual")
+  expiryMonths      Int      @default(12)
+  showClassPublicly Boolean  @default(true)
+  showNamePublicly  Boolean  @default(false)
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
 
   @@unique([accountId, schoolId, branchId])
 }
+
 // Eleeveon Center E2EE public device directory. Private keys NEVER leave devices.
 // Support messages continue using PlatformFeedbackMessage.body as opaque ciphertext.
 model SupportEncryptionDevice {
@@ -2188,80 +2189,82 @@ model SupportEncryptionDevice {
   @@index([revokedAt])
 }
 
-
 // Eleeveon Center surveys: structured publishing and one response per invited user.
 // Answers are server-accessible for aggregation; do not describe surveys as E2EE.
 model EleeveonSurvey {
-  id String @id @default(uuid())
-  title String
-  description String?
-  questions Json
-  targeting Json?
-  status String @default("draft")
+  id              String                   @id @default(uuid())
+  title           String
+  description     String?
+  questions       Json
+  targeting       Json?
+  status          String                   @default("draft")
   createdByUserId String
-  opensAt DateTime?
-  closesAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  responses EleeveonSurveyResponse[]
+  opensAt         DateTime?
+  closesAt        DateTime?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  responses       EleeveonSurveyResponse[]
+
   @@index([status, createdAt])
   @@index([createdByUserId])
 }
 
 model EleeveonSurveyResponse {
-  id String @id @default(uuid())
-  surveyId String
-  accountId String
-  userId String
-  branchId String?
-  answers Json
-  submittedAt DateTime @default(now())
-  survey EleeveonSurvey @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  id          String         @id @default(uuid())
+  surveyId    String
+  accountId   String
+  userId      String
+  branchId    String?
+  answers     Json
+  submittedAt DateTime       @default(now())
+  survey      EleeveonSurvey @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+
   @@unique([surveyId, userId])
   @@index([surveyId, submittedAt])
   @@index([accountId, submittedAt])
 }
 
-
 // Presence is short lived. No typing or recording content is persisted.
 model EleeveonSupportPresence {
- id String @id @default(uuid())
- feedbackId String
- userId String
- accountId String
- activity String @default("online")
- expiresAt DateTime
- updatedAt DateTime @updatedAt
- @@unique([feedbackId,userId])
- @@index([feedbackId,expiresAt])
+  id         String   @id @default(uuid())
+  feedbackId String
+  userId     String
+  accountId  String
+  activity   String   @default("online")
+  expiresAt  DateTime
+  updatedAt  DateTime @updatedAt
+
+  @@unique([feedbackId, userId])
+  @@index([feedbackId, expiresAt])
 }
 
 // WebRTC signalling metadata. Audio/video/screen pixels never go into PostgreSQL.
 model EleeveonSupportSignal {
- id String @id @default(uuid())
- feedbackId String
- fromUserId String
- sessionId String
- kind String
- payload Json?
- createdAt DateTime @default(now())
- expiresAt DateTime
- @@index([feedbackId,createdAt])
- @@index([expiresAt])
+  id         String   @id @default(uuid())
+  feedbackId String
+  fromUserId String
+  sessionId  String
+  kind       String
+  payload    Json?
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([feedbackId, createdAt])
+  @@index([expiresAt])
 }
 
-
 model EleeveonSupportDirectUpload {
- id String @id @default(uuid())
- feedbackId String
- accountId String
- userId String
- messageId String
- storageKey String @unique
- expectedBytes Int
- consumedAt DateTime?
- createdAt DateTime @default(now())
- expiresAt DateTime
- @@index([feedbackId,userId,messageId])
- @@index([expiresAt])
+  id            String    @id @default(uuid())
+  feedbackId    String
+  accountId     String
+  userId        String
+  messageId     String
+  storageKey    String    @unique
+  expectedBytes Int
+  consumedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+
+  @@index([feedbackId, userId, messageId])
+  @@index([expiresAt])
 }

@@ -1,0 +1,46 @@
+
+[+] Added tables
+  - SupportEncryptionDevice
+  - EleeveonSurvey
+  - EleeveonSurveyResponse
+  - EleeveonSupportPresence
+  - EleeveonSupportSignal
+  - EleeveonSupportDirectUpload
+
+[*] Changed the `EleeveonSupportDirectUpload` table
+  [+] Added unique index on columns (storageKey)
+  [+] Added index on columns (feedbackId, userId, messageId)
+  [+] Added index on columns (expiresAt)
+
+[*] Changed the `EleeveonSupportPresence` table
+  [+] Added index on columns (feedbackId, expiresAt)
+  [+] Added unique index on columns (feedbackId, userId)
+
+[*] Changed the `EleeveonSupportSignal` table
+  [+] Added index on columns (feedbackId, createdAt)
+  [+] Added index on columns (expiresAt)
+
+[*] Changed the `EleeveonSurvey` table
+  [+] Added index on columns (status, createdAt)
+  [+] Added index on columns (createdByUserId)
+
+[*] Changed the `EleeveonSurveyResponse` table
+  [+] Added index on columns (surveyId, submittedAt)
+  [+] Added index on columns (accountId, submittedAt)
+  [+] Added unique index on columns (surveyId, userId)
+  [+] Added foreign key on columns (surveyId)
+
+[*] Changed the `IdentityCardRegistry` table
+  [*] Altered column `id` (default changed from `Some(DbGenerated(Some("(gen_random_uuid())::text")))` to `Some(DbGenerated(Some("gen_random_uuid()::text")))`)
+  [*] Altered column `publicId` (default changed from `Some(DbGenerated(Some("(gen_random_uuid())::text")))` to `Some(DbGenerated(Some("gen_random_uuid()::text")))`)
+
+[*] Changed the `IdentityCardRegistryEvent` table
+  [*] Altered column `id` (default changed from `Some(DbGenerated(Some("(gen_random_uuid())::text")))` to `Some(DbGenerated(Some("gen_random_uuid()::text")))`)
+
+[*] Changed the `IdentityIssuancePolicy` table
+  [*] Altered column `id` (default changed from `Some(DbGenerated(Some("(gen_random_uuid())::text")))` to `Some(DbGenerated(Some("gen_random_uuid()::text")))`)
+
+[*] Changed the `SupportEncryptionDevice` table
+  [+] Added index on columns (accountId, userId)
+  [+] Added index on columns (userId, revokedAt)
+  [+] Added index on columns (revokedAt)
