@@ -10,6 +10,7 @@ export type SupportAttachment = {
   sizeBytes: number;
   storageKey: string;
   kind: "image" | "video" | "audio" | "document";
+  encrypted?: boolean;
 };
 
 export type SupportFile = {
@@ -52,11 +53,12 @@ export class SupportStorageService {
     this.storage = createClient(url, secret, { auth: { persistSession: false, autoRefreshToken: false } });
   }
 
-  async store(accountId: string, feedbackId: string, file: SupportFile): Promise<SupportAttachment> {
+  async store(accountId: string, feedbackId: string, file: SupportFile, encrypted = false): Promise<SupportAttachment> {
     if (!file?.buffer?.length || !Buffer.isBuffer(file.buffer)) throw new BadRequestException("Select a non-empty attachment.");
     const rawType = String(file.mimetype || "").toLowerCase().split(";")[0].trim();
     const mimeType = rawType === "video/mp4" && file.originalname?.toLowerCase().endsWith(".m4a") ? "audio/mp4" : rawType;
-    const extension = ALLOWED.get(mimeType);
+    const extension = encrypted && mimeType === "application/octet-stream" ? ".e2ee" : ALLOWED.get(mimeType);
+    if (encrypted && mimeType !== "application/octet-stream") throw new BadRequestException("Expected an encrypted attachment.");
     if (!extension) throw new BadRequestException("This file type is not supported. Choose an image, audio, video, document or ZIP file.");
     if (file.buffer.length > this.maxBytes) throw new BadRequestException(`Attachment exceeds the ${Math.ceil(this.maxBytes / 1024 / 1024)} MB limit.`);
     const name = String(file.originalname || "attachment").replace(/[\\/\r\n\x00-\x1f]/g, "_").slice(0, 160);
@@ -68,19 +70,27 @@ export class SupportStorageService {
     });
     if (error) throw new ServiceUnavailableException(`Private support attachment upload failed: ${error.message}`);
     const kind: SupportAttachment["kind"] = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video" : "document";
-    return { name, mimeType, sizeBytes: file.buffer.length, storageKey, kind };
+    return { name: encrypted ? "encrypted.bin" : name, mimeType, sizeBytes: file.buffer.length, storageKey, kind, encrypted };
   }
 
-  /** Best-effort cleanup after a failed attachment-message database write. */
-  async remove(attachment: SupportAttachment): Promise<void> {
-    try {
-      const { error } = await this.storage.storage.from(this.bucket).remove([attachment.storageKey]);
-      if (error) console.warn("[support] Could not clean up failed attachment upload:", error.message);
-    } catch (error) {
-      console.warn("[support] Attachment cleanup failed:", error);
-    }
+  // Large encrypted videos are uploaded directly to the private bucket, never buffered in Render.
+  async reserveDirectUpload(accountId:string,feedbackId:string){
+    const storageKey=`${accountId.replace(/[^a-zA-Z0-9_-]/g,"_")}/${feedbackId.replace(/[^a-zA-Z0-9_-]/g,"_")}/${randomUUID()}.e2ee`;
+    const {data,error}=await this.storage.storage.from(this.bucket).createSignedUploadUrl(storageKey);
+    if(error||!data?.signedUrl)throw new ServiceUnavailableException("Cannot prepare private media upload.");
+    return {storageKey,signedUrl:data.signedUrl};
+  }
+  async confirmDirectUpload(storageKey:string,expectedBytes:number):Promise<SupportAttachment>{
+    const {data,error}=await this.storage.storage.from(this.bucket).info(storageKey);
+    if(error||!data)throw new BadRequestException("The encrypted upload has not completed.");
+    if(Number(data.size)!==expectedBytes)throw new BadRequestException("Uploaded file size does not match the reserved encrypted file.");
+    if(data.contentType&&data.contentType.split(";")[0]!=="application/octet-stream")throw new BadRequestException("The direct-upload content type must be application/octet-stream.");
+    return {name:"encrypted.bin",mimeType:"application/octet-stream",sizeBytes:expectedBytes,storageKey,kind:"document",encrypted:true};
   }
 
+  async remove(storageKey:string):Promise<void>{
+    await this.storage.storage.from(this.bucket).remove([storageKey]);
+  }
   async signedUrl(attachment: SupportAttachment): Promise<string | null> {
     const { data, error } = await this.storage.storage.from(this.bucket).createSignedUrl(
       attachment.storageKey, 600,
