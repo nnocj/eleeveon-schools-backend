@@ -2170,3 +2170,98 @@ model IdentityIssuancePolicy {
 
   @@unique([accountId, schoolId, branchId])
 }
+// Eleeveon Center E2EE public device directory. Private keys NEVER leave devices.
+// Support messages continue using PlatformFeedbackMessage.body as opaque ciphertext.
+model SupportEncryptionDevice {
+  id                  String    @id @default(uuid())
+  accountId           String
+  userId              String
+  encryptionPublicJwk Json
+  signingPublicJwk    Json
+  fingerprint         String
+  registeredAt        DateTime  @default(now())
+  lastSeenAt          DateTime  @default(now())
+  revokedAt           DateTime?
+
+  @@index([accountId, userId])
+  @@index([userId, revokedAt])
+  @@index([revokedAt])
+}
+
+
+// Eleeveon Center surveys: structured publishing and one response per invited user.
+// Answers are server-accessible for aggregation; do not describe surveys as E2EE.
+model EleeveonSurvey {
+  id String @id @default(uuid())
+  title String
+  description String?
+  questions Json
+  targeting Json?
+  status String @default("draft")
+  createdByUserId String
+  opensAt DateTime?
+  closesAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  responses EleeveonSurveyResponse[]
+  @@index([status, createdAt])
+  @@index([createdByUserId])
+}
+
+model EleeveonSurveyResponse {
+  id String @id @default(uuid())
+  surveyId String
+  accountId String
+  userId String
+  branchId String?
+  answers Json
+  submittedAt DateTime @default(now())
+  survey EleeveonSurvey @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  @@unique([surveyId, userId])
+  @@index([surveyId, submittedAt])
+  @@index([accountId, submittedAt])
+}
+
+
+// Presence is short lived. No typing or recording content is persisted.
+model EleeveonSupportPresence {
+ id String @id @default(uuid())
+ feedbackId String
+ userId String
+ accountId String
+ activity String @default("online")
+ expiresAt DateTime
+ updatedAt DateTime @updatedAt
+ @@unique([feedbackId,userId])
+ @@index([feedbackId,expiresAt])
+}
+
+// WebRTC signalling metadata. Audio/video/screen pixels never go into PostgreSQL.
+model EleeveonSupportSignal {
+ id String @id @default(uuid())
+ feedbackId String
+ fromUserId String
+ sessionId String
+ kind String
+ payload Json?
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ @@index([feedbackId,createdAt])
+ @@index([expiresAt])
+}
+
+
+model EleeveonSupportDirectUpload {
+ id String @id @default(uuid())
+ feedbackId String
+ accountId String
+ userId String
+ messageId String
+ storageKey String @unique
+ expectedBytes Int
+ consumedAt DateTime?
+ createdAt DateTime @default(now())
+ expiresAt DateTime
+ @@index([feedbackId,userId,messageId])
+ @@index([expiresAt])
+}
