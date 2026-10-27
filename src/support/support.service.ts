@@ -1,6 +1,7 @@
 /** Authenticated cross-account support conversations, backed by existing Prisma models. */
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthUser } from "../common/auth-user";
 import { SupportStorageService, type SupportAttachment, type SupportFile } from "./support-storage.service";
@@ -239,7 +240,10 @@ export class SupportService {
       take: 300,
     });
     const allowed=access.platform?rows:(await Promise.all(rows.map(async row=>await this.permittedTarget(access.accountId,access.userId,row)?row:null))).filter((r):r is (typeof rows)[number]=>r!==null);
-    return {conversations:allowed.map(({messages,account,...row})=>({
+    const unread = await this.unread(actor);
+    const unreadById = new Map(unread.conversations.map(x => [x.id, x.unreadCount]));
+    return { unreadTotal: unread.total, conversations:allowed.map(({messages,account,...row})=>({
+       unreadCount: unreadById.get(row.id) || 0,
       ...row,organizationName:account?.name||"School",lastMessage:messages[0]?{body:messages[0].body,createdAt:messages[0].createdAt,authorType:messages[0].authorType}:null,
     }))};
   }
@@ -250,9 +254,21 @@ export class SupportService {
       where: { feedbackId, ...(access.platform ? {} : { internal: false }) },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 700,
     });
-    const expanded = await Promise.all(messages.map(async (message) => ({
+    const hiddenRows = await this.prisma.$queryRaw<Array<{messageId: string}>>`
+      SELECT "messageId" FROM "SupportMessageHidden" WHERE "userId" = ${access.userId}
+    `;
+    const tombstones = await this.prisma.$queryRaw<Array<{messageId: string}>>`
+      SELECT "messageId" FROM "SupportMessageTombstone" WHERE "feedbackId" = ${feedbackId}
+    `;
+    const hiddenIds = new Set(hiddenRows.map(x => x.messageId));
+    const deletedIds = new Set(tombstones.map(x => x.messageId));
+    const visibleMessages = messages.filter(m => !hiddenIds.has(m.id));
+    const expanded = await Promise.all(visibleMessages.map(async (message) => ({
+      ...(deletedIds.has(message.id)
+        ? { ...message, body: "", attachments: [], deletedForEveryone: true }
+        : message),
       ...message,
-      attachments: await Promise.all(asAttachments(message.attachments).map(async (item) => ({
+      attachments: deletedIds.has(message.id) ? [] : await Promise.all(asAttachments(message.attachments).map(async (item) => ({
         name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes,
         kind: item.kind, url: await this.storage.signedUrl(item),
       }))),
@@ -405,5 +421,87 @@ export class SupportService {
       feedbackId, toStatus: status, changedByUserId: access.userId,
     } });
     return { conversation: updated };
+  }
+
+  /** User-specific, persisted read state; never exposes decrypted message content. */
+  async markRead(actor: AuthUser, feedbackId: string) {
+    const { access } = await this.accessibleConversation(actor, feedbackId);
+    const latest = await this.prisma.platformFeedbackMessage.findFirst({
+      where: { feedbackId, internal: false }, orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { createdAt: true },
+    });
+    const cutoff = latest?.createdAt || new Date();
+    await this.prisma.$executeRaw`
+      INSERT INTO "SupportMessageRead" ("feedbackId", "userId", "readAt")
+      VALUES (${feedbackId}, ${access.userId}, ${cutoff})
+      ON CONFLICT ("feedbackId", "userId")
+      DO UPDATE SET "readAt" = GREATEST("SupportMessageRead"."readAt", EXCLUDED."readAt")
+    `;
+    return { ok: true, feedbackId, readAt: cutoff };
+  }
+
+  /** Counts are strictly authorized and ignore own/hidden/deleted messages. */
+  async unread(actor: AuthUser) {
+    const access = await this.authorize(actor);
+    const rows = await this.prisma.platformFeedback.findMany({
+      where: access.platform ? {} : { accountId: access.accountId },
+      select: { id: true, accountId: true, submittedByUserId: true, metadata: true },
+      orderBy: { updatedAt: "desc" }, take: 300,
+    });
+    const allowed = access.platform ? rows : (await Promise.all(rows.map(async row =>
+      await this.permittedTarget(access.accountId, access.userId, row) ? row : null
+    ))).filter((row): row is NonNullable<typeof row> => row !== null);
+    if (!allowed.length) return { total: 0, conversations: [] as Array<{id:string;unreadCount:number}> };
+    const ids = allowed.map(x => x.id);
+    const counts = await this.prisma.$queryRaw<Array<{ feedbackId: string; count: bigint }>>`
+      SELECT m."feedbackId" AS "feedbackId", COUNT(*)::bigint AS count
+      FROM "PlatformFeedbackMessage" m
+      LEFT JOIN "SupportMessageRead" r ON r."feedbackId" = m."feedbackId" AND r."userId" = ${access.userId}
+      LEFT JOIN "SupportMessageHidden" h ON h."messageId" = m.id AND h."userId" = ${access.userId}
+      LEFT JOIN "SupportMessageTombstone" t ON t."messageId" = m.id
+      WHERE m."feedbackId" IN (${Prisma.join(ids)})
+        AND m.internal = false
+        AND (m."authorUserId" IS NULL OR m."authorUserId" <> ${access.userId})
+        AND (r."readAt" IS NULL OR m."createdAt" > r."readAt")
+        AND h."messageId" IS NULL AND t."messageId" IS NULL
+      GROUP BY m."feedbackId"
+    `;
+    const byId = new Map(counts.map(x => [x.feedbackId, Number(x.count)]));
+    const conversations = allowed.map(x => ({ id: x.id, unreadCount: byId.get(x.id) || 0 }));
+    return { total: conversations.reduce((sum, x) => sum + x.unreadCount, 0), conversations };
+  }
+
+  /** Hide for one account user across all their devices; does not delete others' messages. */
+  async deleteForMe(actor: AuthUser, feedbackId: string, messageId: string) {
+    const { access } = await this.accessibleConversation(actor, feedbackId);
+    const message = await this.prisma.platformFeedbackMessage.findFirst({ where: { id: messageId, feedbackId, internal: false }, select: { id: true } });
+    if (!message) throw new NotFoundException("Message not found.");
+    await this.prisma.$executeRaw`
+      INSERT INTO "SupportMessageHidden" ("messageId", "userId") VALUES (${messageId}, ${access.userId})
+      ON CONFLICT ("messageId", "userId") DO NOTHING
+    `;
+    return { ok: true, messageId, scope: "me" };
+  }
+
+  /** Sender-only global deletion: clear ciphertext, attachment references and create tombstone. */
+  async deleteForEveryone(actor: AuthUser, feedbackId: string, messageId: string) {
+    const { access } = await this.accessibleConversation(actor, feedbackId);
+    const message = await this.prisma.platformFeedbackMessage.findFirst({
+      where: { id: messageId, feedbackId, internal: false },
+    });
+    if (!message) throw new NotFoundException("Message not found.");
+    if (message.authorUserId !== access.userId) throw new ForbiddenException("Only the sender may delete this message for everyone.");
+    const attachments = asAttachments(message.attachments);
+    await this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`
+        INSERT INTO "SupportMessageTombstone" ("messageId", "feedbackId", "deletedByUserId")
+        VALUES (${messageId}, ${feedbackId}, ${access.userId})
+        ON CONFLICT ("messageId") DO NOTHING
+      `;
+      await tx.platformFeedbackMessage.update({ where: { id: messageId }, data: { body: "", attachments: [] } });
+    });
+    // Storage deletion is best-effort; a scheduled orphan cleanup should retry failures.
+    await Promise.allSettled(attachments.map(a => this.storage.remove(a.storageKey)));
+    return { ok: true, messageId, scope: "everyone" };
   }
 }
