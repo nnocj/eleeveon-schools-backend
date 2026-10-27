@@ -217,7 +217,6 @@ export class AccountsController {
     "platform_team",
     "owner",
     "super_admin",
-    "school_admin",
     "admin",
     "branch_admin",
   )
