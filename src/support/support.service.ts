@@ -240,6 +240,17 @@ export class SupportService {
       take: 300,
     });
     const allowed=access.platform?rows:(await Promise.all(rows.map(async row=>await this.permittedTarget(access.accountId,access.userId,row)?row:null))).filter((r):r is (typeof rows)[number]=>r!==null);
+    const hidden = await this.prisma.$queryRaw<Array<{feedbackId:string}>>`
+      SELECT "feedbackId" FROM "SupportConversationPreference"
+      WHERE "userId" = ${access.userId} AND "hiddenAt" IS NOT NULL
+    `;
+    const hiddenIds = new Set(hidden.map(x => x.feedbackId));
+    const shown = allowed.filter(x => !hiddenIds.has(x.id));
+    const customTitles = shown.length ? await this.prisma.$queryRaw<Array<{feedbackId:string;title:string|null}>>`
+      SELECT "feedbackId", title FROM "SupportConversationPreference"
+      WHERE "userId" = ${access.userId} AND title IS NOT NULL
+    ` : [];
+    const titleById = new Map(customTitles.map(x => [x.feedbackId,x.title]));
     const unread = await this.unread(actor);
     const unreadById = new Map(unread.conversations.map(x => [x.id, x.unreadCount]));
     return { unreadTotal: unread.total, conversations:allowed.map(({messages,account,...row})=>({
@@ -250,6 +261,12 @@ export class SupportService {
 
   async open(actor: AuthUser, feedbackId: string) {
     const { access, conversation } = await this.accessibleConversation(actor, feedbackId);
+    const preferences = await this.prisma.$queryRaw<Array<{hiddenAt:Date|null;title:string|null}>>`
+      SELECT "hiddenAt", title FROM "SupportConversationPreference"
+      WHERE "feedbackId" = ${feedbackId} AND "userId" = ${access.userId}
+    `;
+    if (preferences[0]?.hiddenAt) throw new NotFoundException("Conversation removed from your inbox.");
+    const displayTitle = preferences[0]?.title || null;
     const messages = await this.prisma.platformFeedbackMessage.findMany({
       where: { feedbackId, ...(access.platform ? {} : { internal: false }) },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 700,
@@ -273,7 +290,7 @@ export class SupportService {
         kind: item.kind, url: await this.storage.signedUrl(item),
       }))),
     })));
-    return { conversation: { ...conversation, organizationName: conversation.account?.name || "School" }, messages: expanded };
+    return { conversation: { ...conversation, organizationName: conversation.account?.name || "School", displayTitle }, messages: expanded };
   }
 
   async create(actor: AuthUser, input: Record<string, unknown>) {
@@ -423,6 +440,30 @@ export class SupportService {
     return { conversation: updated };
   }
 
+  /** Personal conversation title, which does not change ciphertext or the recipient's copy. */
+  async renameConversation(actor: AuthUser, feedbackId: string, titleInput: unknown) {
+    const { access } = await this.accessibleConversation(actor, feedbackId);
+    const title = text(titleInput, 100);
+    if (!title) throw new BadRequestException("Enter a conversation name.");
+    await this.prisma.$executeRaw`
+      INSERT INTO "SupportConversationPreference" ("feedbackId", "userId", title)
+      VALUES (${feedbackId}, ${access.userId}, ${title})
+      ON CONFLICT ("feedbackId", "userId") DO UPDATE SET title = EXCLUDED.title
+    `;
+    return { ok: true, displayTitle: title };
+  }
+
+  /** Remove a conversation from this user's inbox across devices, not for other users. */
+  async removeConversation(actor: AuthUser, feedbackId: string) {
+    const { access } = await this.accessibleConversation(actor, feedbackId);
+    await this.prisma.$executeRaw`
+      INSERT INTO "SupportConversationPreference" ("feedbackId", "userId", "hiddenAt")
+      VALUES (${feedbackId}, ${access.userId}, NOW())
+      ON CONFLICT ("feedbackId", "userId") DO UPDATE SET "hiddenAt" = NOW()
+    `;
+    return { ok: true, feedbackId };
+  }
+
   /** User-specific, persisted read state; never exposes decrypted message content. */
   async markRead(actor: AuthUser, feedbackId: string) {
     const { access } = await this.accessibleConversation(actor, feedbackId);
@@ -451,8 +492,14 @@ export class SupportService {
     const allowed = access.platform ? rows : (await Promise.all(rows.map(async row =>
       await this.permittedTarget(access.accountId, access.userId, row) ? row : null
     ))).filter((row): row is NonNullable<typeof row> => row !== null);
-    if (!allowed.length) return { total: 0, conversations: [] as Array<{id:string;unreadCount:number}> };
-    const ids = allowed.map(x => x.id);
+    const hidden = await this.prisma.$queryRaw<Array<{feedbackId:string}>>`
+      SELECT "feedbackId" FROM "SupportConversationPreference"
+      WHERE "userId" = ${access.userId} AND "hiddenAt" IS NOT NULL
+    `;
+    const hiddenIds = new Set(hidden.map(row => row.feedbackId));
+    const visible = allowed.filter(row => !hiddenIds.has(row.id));
+    if (!visible.length) return { total: 0, conversations: [] as Array<{id:string;unreadCount:number}> };
+    const ids = visible.map(x => x.id);
     const counts = await this.prisma.$queryRaw<Array<{ feedbackId: string; count: bigint }>>`
       SELECT m."feedbackId" AS "feedbackId", COUNT(*)::bigint AS count
       FROM "PlatformFeedbackMessage" m
@@ -467,7 +514,7 @@ export class SupportService {
       GROUP BY m."feedbackId"
     `;
     const byId = new Map(counts.map(x => [x.feedbackId, Number(x.count)]));
-    const conversations = allowed.map(x => ({ id: x.id, unreadCount: byId.get(x.id) || 0 }));
+    const conversations = visible.map(x => ({ id: x.id, unreadCount: byId.get(x.id) || 0 }));
     return { total: conversations.reduce((sum, x) => sum + x.unreadCount, 0), conversations };
   }
 
