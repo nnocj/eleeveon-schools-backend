@@ -228,6 +228,18 @@ export class SupportService {
     return { access, conversation };
   }
 
+
+/** Per-user inbox settings live in existing PlatformFeedback.metadata (no new table). */
+function conversationPreference(metadata: unknown, userId: string): { title?: string; hiddenAt?: string } {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return {};
+  const root = metadata as Record<string, unknown>;
+  const all = root.supportChatPreferences;
+  if (!all || typeof all !== "object" || Array.isArray(all)) return {};
+  const item = (all as Record<string, unknown>)[userId];
+  if (!item || typeof item !== "object" || Array.isArray(item)) return {};
+  return item as { title?: string; hiddenAt?: string };
+}
+
   async list(actor: AuthUser) {
     const access = await this.authorize(actor);
     const rows = await this.prisma.platformFeedback.findMany({
@@ -240,33 +252,23 @@ export class SupportService {
       take: 300,
     });
     const allowed=access.platform?rows:(await Promise.all(rows.map(async row=>await this.permittedTarget(access.accountId,access.userId,row)?row:null))).filter((r):r is (typeof rows)[number]=>r!==null);
-    const hidden = await this.prisma.$queryRaw<Array<{feedbackId:string}>>`
-      SELECT "feedbackId" FROM "SupportConversationPreference"
-      WHERE "userId" = ${access.userId} AND "hiddenAt" IS NOT NULL
-    `;
-    const hiddenIds = new Set(hidden.map(x => x.feedbackId));
-    const shown = allowed.filter(x => !hiddenIds.has(x.id));
-    const customTitles = shown.length ? await this.prisma.$queryRaw<Array<{feedbackId:string;title:string|null}>>`
-      SELECT "feedbackId", title FROM "SupportConversationPreference"
-      WHERE "userId" = ${access.userId} AND title IS NOT NULL
-    ` : [];
-    const titleById = new Map(customTitles.map(x => [x.feedbackId,x.title]));
+    const shown = allowed.filter(row => !conversationPreference(row.metadata, access.userId).hiddenAt);
     const unread = await this.unread(actor);
     const unreadById = new Map(unread.conversations.map(x => [x.id, x.unreadCount]));
-    return { unreadTotal: unread.total, conversations:allowed.map(({messages,account,...row})=>({
-       unreadCount: unreadById.get(row.id) || 0,
-      ...row,organizationName:account?.name||"School",lastMessage:messages[0]?{body:messages[0].body,createdAt:messages[0].createdAt,authorType:messages[0].authorType}:null,
-    }))};
+    return { unreadTotal: unread.total, conversations: shown.map(({ messages, account, ...row }) => ({
+      ...row,
+      displayTitle: conversationPreference(row.metadata, access.userId).title || null,
+      unreadCount: unreadById.get(row.id) || 0,
+      organizationName: account?.name || "School",
+      lastMessage: messages[0] ? { body: messages[0].body, createdAt: messages[0].createdAt, authorType: messages[0].authorType } : null,
+    })) };
   }
 
   async open(actor: AuthUser, feedbackId: string) {
     const { access, conversation } = await this.accessibleConversation(actor, feedbackId);
-    const preferences = await this.prisma.$queryRaw<Array<{hiddenAt:Date|null;title:string|null}>>`
-      SELECT "hiddenAt", title FROM "SupportConversationPreference"
-      WHERE "feedbackId" = ${feedbackId} AND "userId" = ${access.userId}
-    `;
-    if (preferences[0]?.hiddenAt) throw new NotFoundException("Conversation removed from your inbox.");
-    const displayTitle = preferences[0]?.title || null;
+    const preference = conversationPreference(conversation.metadata, access.userId);
+    if (preference.hiddenAt) throw new NotFoundException("Conversation removed from your inbox.");
+    const displayTitle = preference.title || null;
     const messages = await this.prisma.platformFeedbackMessage.findMany({
       where: { feedbackId, ...(access.platform ? {} : { internal: false }) },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 700,
@@ -446,20 +448,30 @@ export class SupportService {
     const title = text(titleInput, 100);
     if (!title) throw new BadRequestException("Enter a conversation name.");
     await this.prisma.$executeRaw`
-      INSERT INTO "SupportConversationPreference" ("feedbackId", "userId", title)
-      VALUES (${feedbackId}, ${access.userId}, ${title})
-      ON CONFLICT ("feedbackId", "userId") DO UPDATE SET title = EXCLUDED.title
+      UPDATE "PlatformFeedback" SET metadata =
+        jsonb_set(
+          COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('supportChatPreferences', COALESCE(metadata->'supportChatPreferences', '{}'::jsonb)),
+          ARRAY['supportChatPreferences', ${access.userId}],
+          COALESCE(metadata->'supportChatPreferences'->${access.userId}, '{}'::jsonb) || jsonb_build_object('title', ${title}),
+          true
+        )
+      WHERE id = ${feedbackId}
     `;
     return { ok: true, displayTitle: title };
   }
 
-  /** Remove a conversation from this user's inbox across devices, not for other users. */
+  /** Hide this chat only for its current user, preserving everybody else's inbox. */
   async removeConversation(actor: AuthUser, feedbackId: string) {
     const { access } = await this.accessibleConversation(actor, feedbackId);
     await this.prisma.$executeRaw`
-      INSERT INTO "SupportConversationPreference" ("feedbackId", "userId", "hiddenAt")
-      VALUES (${feedbackId}, ${access.userId}, NOW())
-      ON CONFLICT ("feedbackId", "userId") DO UPDATE SET "hiddenAt" = NOW()
+      UPDATE "PlatformFeedback" SET metadata =
+        jsonb_set(
+          COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('supportChatPreferences', COALESCE(metadata->'supportChatPreferences', '{}'::jsonb)),
+          ARRAY['supportChatPreferences', ${access.userId}],
+          COALESCE(metadata->'supportChatPreferences'->${access.userId}, '{}'::jsonb) || jsonb_build_object('hiddenAt', CURRENT_TIMESTAMP::text),
+          true
+        )
+      WHERE id = ${feedbackId}
     `;
     return { ok: true, feedbackId };
   }
@@ -492,12 +504,7 @@ export class SupportService {
     const allowed = access.platform ? rows : (await Promise.all(rows.map(async row =>
       await this.permittedTarget(access.accountId, access.userId, row) ? row : null
     ))).filter((row): row is NonNullable<typeof row> => row !== null);
-    const hidden = await this.prisma.$queryRaw<Array<{feedbackId:string}>>`
-      SELECT "feedbackId" FROM "SupportConversationPreference"
-      WHERE "userId" = ${access.userId} AND "hiddenAt" IS NOT NULL
-    `;
-    const hiddenIds = new Set(hidden.map(row => row.feedbackId));
-    const visible = allowed.filter(row => !hiddenIds.has(row.id));
+    const visible = allowed.filter(row => !conversationPreference(row.metadata, access.userId).hiddenAt);
     if (!visible.length) return { total: 0, conversations: [] as Array<{id:string;unreadCount:number}> };
     const ids = visible.map(x => x.id);
     const counts = await this.prisma.$queryRaw<Array<{ feedbackId: string; count: bigint }>>`
