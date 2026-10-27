@@ -210,6 +210,33 @@ export class AccountsController {
     );
   }
 
+  // Edit login contact details for an existing linked lower-role user.
+  // The service enforces active branch scope and blocks privileged accounts.
+  @Roles(
+    "developer",
+    "platform_team",
+    "owner",
+    "super_admin",
+    "school_admin",
+    "admin",
+    "branch_admin",
+  )
+  @Patch("me/branch-users/:id/identity")
+  updateBranchUserIdentity(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body() body: {
+      schoolId?: string;
+      branchId?: string;
+      email?: string;
+      fullName?: string;
+      phone?: string;
+      password?: string;
+    },
+  ) {
+    return this.accountsService.updateBranchUserIdentity(req.user, id, body);
+  }
+
   @Roles(
     "developer",
     "platform_team",
