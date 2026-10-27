@@ -32,6 +32,8 @@ export class SupportController {
   @Get("conversations") list(@Req() req:RequestWithUser){return this.support.list(req.user);}
   @Post("conversations") create(@Req() req:RequestWithUser,@Body() body:Record<string,unknown>){return this.support.create(req.user,body||{});}
   @Get("conversations/:id") open(@Req() req:RequestWithUser,@Param("id") id:string){return this.support.open(req.user,id);}
+  @Patch("conversations/:id/title") renameConversation(@Req() req:RequestWithUser,@Param("id") id:string,@Body("title") title:string){return this.support.renameConversation(req.user,id,title);}
+  @Delete("conversations/:id") removeConversation(@Req() req:RequestWithUser,@Param("id") id:string){return this.support.removeConversation(req.user,id);}
   @Post("conversations/:id/read") markRead(@Req() req:RequestWithUser,@Param("id") id:string){return this.support.markRead(req.user,id);}
   @Delete("conversations/:id/messages/:messageId") deleteMessage(@Req() req:RequestWithUser,@Param("id") id:string,@Param("messageId") messageId:string,@Query("scope") scope?:string){
     return scope === "everyone" ? this.support.deleteForEveryone(req.user,id,messageId) : scope === "me" ? this.support.deleteForMe(req.user,id,messageId) : (()=>{throw new BadRequestException("Scope must be me or everyone");})();
