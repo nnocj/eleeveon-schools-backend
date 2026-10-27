@@ -1352,6 +1352,222 @@ export class AccountsService {
     return created;
   }
 
+  /**
+   * Update the login identity of a person already linked to this branch.
+   * The same AppUser powers Accountant, Teacher, Student and Parent access.
+   *
+   * School profile contact fields are synchronized by the frontend's
+   * updateLocal() after this endpoint confirms the authoritative identity.
+   * Do not return or persist plaintext credentials.
+   */
+  async updateBranchUserIdentity(
+    actor: AuthUser,
+    userId: string,
+    body: {
+      schoolId?: string;
+      branchId?: string;
+      email?: string;
+      fullName?: string;
+      phone?: string;
+      password?: string;
+    },
+  ) {
+    const schoolId = typeof body?.schoolId === "string" ? body.schoolId.trim() : "";
+    const branchId = typeof body?.branchId === "string" ? body.branchId.trim() : "";
+    if (!schoolId || !branchId) {
+      throw new BadRequestException("School and branch are required.");
+    }
+    if (!userId.trim()) {
+      throw new BadRequestException("A valid user id is required.");
+    }
+
+    const accountId = actor.accountId;
+    const actorRole = this.normalizedActorRole(actor.role);
+    const branchAdmin = actorRole === "branch_admin";
+    if (!branchAdmin && !ACCOUNT_USER_MANAGEMENT_ROLES.has(actorRole)) {
+      throw new ForbiddenException("You cannot manage user identities.");
+    }
+
+    // Branch Admin must prove an active membership in precisely this branch.
+    // Browser-selected school/branch ids are never authorization evidence.
+    if (branchAdmin) {
+      const permission = await this.prisma.userMembership.findFirst({
+        where: {
+          accountId,
+          userId: actor.id,
+          schoolId,
+          branchId,
+          role: "branch_admin",
+          active: true,
+          status: "active",
+        },
+        select: { id: true },
+      });
+      if (!permission) {
+        throw new ForbiddenException("You cannot manage users in this branch.");
+      }
+    }
+
+    // Never use the general account-level user management route for these
+    // identity edits: this endpoint is intentionally scoped to lower roles.
+    const target = await this.prisma.appUser.findFirst({
+      where: { id: userId, accountId },
+      include: { memberships: true },
+    });
+    if (!target) throw new NotFoundException("Linked account user not found.");
+
+    const canonicalRole = (value: string) => {
+      const normalized = normalizeRole(value);
+      return normalized ? (normalized === "admin" ? "school_admin" : normalized) : "";
+    };
+    if (
+      !BRANCH_ASSIGNABLE_ROLES.has(canonicalRole(target.role)) ||
+      target.memberships.some(
+        (membership) =>
+          membership.active &&
+          membership.status === "active" &&
+          !BRANCH_ASSIGNABLE_ROLES.has(canonicalRole(membership.role)),
+      )
+    ) {
+      throw new ForbiddenException(
+        "Privileged account identities must be managed by the account owner.",
+      );
+    }
+
+    const assignedToBranch = target.memberships.some(
+      (membership) =>
+        membership.accountId === accountId &&
+        membership.schoolId === schoolId &&
+        membership.branchId === branchId &&
+        BRANCH_ASSIGNABLE_ROLES.has(canonicalRole(membership.role)),
+    );
+    if (!assignedToBranch) {
+      throw new ForbiddenException("This user is not assigned to this branch.");
+    }
+
+    // One AppUser may have multiple memberships. Never let a branch admin
+    // change that shared login identity on behalf of another workspace.
+    if (
+      branchAdmin &&
+      target.memberships.some(
+        (membership) =>
+          membership.active &&
+          membership.status === "active" &&
+          (membership.schoolId !== schoolId || membership.branchId !== branchId),
+      )
+    ) {
+      throw new ForbiddenException(
+        "This user has access to another workspace. Ask the account owner to update the shared login identity.",
+      );
+    }
+
+    const optionalString = (field: "email" | "fullName" | "phone" | "password") => {
+      const value = body?.[field];
+      if (value !== undefined && typeof value !== "string") {
+        throw new BadRequestException(`${field} must be a string.`);
+      }
+      return value as string | undefined;
+    };
+    const requestedEmail = optionalString("email");
+    const requestedName = optionalString("fullName");
+    const requestedPhone = optionalString("phone");
+    const requestedPassword = optionalString("password");
+
+    const email = (requestedEmail ?? target.email).trim().toLowerCase();
+    const fullName = (requestedName ?? target.fullName).trim();
+    const phone = requestedPhone !== undefined ? requestedPhone.trim() || null : target.phone;
+
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new BadRequestException("Enter a valid email address.");
+    }
+    if (fullName.length < 2 || fullName.length > 200) {
+      throw new BadRequestException("Full name must contain 2–200 characters.");
+    }
+    if (phone && phone.length > 50) {
+      throw new BadRequestException("Phone number is too long.");
+    }
+    if (requestedPassword !== undefined && requestedPassword !== "" &&
+        (requestedPassword.length < 8 || requestedPassword.length > 256)) {
+      throw new BadRequestException("Password must contain 8–256 characters.");
+    }
+
+    const emailChanged = email !== target.email.trim().toLowerCase();
+    const resetPassword = Boolean(requestedPassword);
+    if (emailChanged) {
+      const emailOwner = await this.prisma.appUser.findUnique({
+        where: { email },
+        select: { id: true },
+      });
+      if (emailOwner && emailOwner.id !== target.id) {
+        throw new ConflictException("This email is already assigned to another user.");
+      }
+    }
+
+    const passwordHash = resetPassword
+      ? await bcrypt.hash(requestedPassword!, 12)
+      : undefined;
+    let user;
+    try {
+      user = await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.appUser.update({
+          where: { id: target.id },
+          data: {
+            email,
+            fullName,
+            phone,
+            ...(emailChanged ? { emailVerifiedAt: null } : {}),
+            ...(passwordHash
+              ? { passwordHash, passwordChangedAt: new Date(), failedLoginCount: 0, lockedUntil: null }
+              : {}),
+          },
+          // Never select passwordHash (or temporary/plaintext credentials).
+          select: {
+            id: true,
+            accountId: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            role: true,
+            active: true,
+            createdAt: true,
+            updatedAt: true,
+            memberships: {
+              where: { schoolId, branchId },
+              orderBy: { createdAt: "asc" },
+            },
+          },
+        });
+        // Password resets invalidate existing refresh sessions.
+        // The user signs in again with the newly assigned password.
+        if (passwordHash) {
+          await tx.userSession.updateMany({
+            where: { accountId, userId: target.id, revokedAt: null },
+            data: { revokedAt: new Date() },
+          });
+        }
+        return updated;
+      });
+    } catch (error: any) {
+      if (error?.code === "P2002") {
+        throw new ConflictException("This email is already assigned to another user.");
+      }
+      throw error;
+    }
+
+    this.realtime.emitMembershipsChanged({
+      accountId,
+      userId: user.id,
+      action: "updated",
+      active: user.active,
+      metadata: {
+        operation: "branch-user-identity-updated",
+        emailChanged,
+        passwordReset: resetPassword,
+      },
+    });
+    return user;
+  }
+
   async updateUser(actor: AuthUser, userId: string, dto: UpdateAccountUserDto) {
     this.assertCanManageAccountUsers(actor.role);
     const existing = await this.prisma.appUser.findUnique({ where: { id: userId } });
