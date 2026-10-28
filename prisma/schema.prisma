@@ -2183,10 +2183,14 @@ model SupportEncryptionDevice {
   registeredAt        DateTime  @default(now())
   lastSeenAt          DateTime  @default(now())
   revokedAt           DateTime?
+  linkedAt            DateTime?
+  linkedByDeviceId    String?
+  deviceName          String?
 
   @@index([accountId, userId])
   @@index([userId, revokedAt])
   @@index([revokedAt])
+  @@index([accountId, userId, linkedAt])
 }
 
 // Eleeveon Center surveys: structured publishing and one response per invited user.
@@ -2267,4 +2271,81 @@ model EleeveonSupportDirectUpload {
 
   @@index([feedbackId, userId, messageId])
   @@index([expiresAt])
+}
+// Hub pairing: public keys only; pairing code is held as an HMAC, never plaintext.
+model SupportDeviceLink {
+  id                  String             @id @default(uuid())
+  accountId           String
+  userId              String
+  targetDeviceId      String
+  codeHash            String
+  challenge           String
+  deviceName          String?
+  status              String             @default("pending")
+  attemptCount        Int                @default(0)
+  approvedByDeviceId  String?
+  approvedAt          DateTime?
+  completedAt         DateTime?
+  expiresAt           DateTime
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  historyKeys         SupportHistoryKey[]
+
+  @@index([accountId, userId, status])
+  @@index([accountId, userId, codeHash, status])
+  @@index([userId, targetDeviceId])
+  @@index([expiresAt])
+}
+
+// Opaque E2EE message-key rewraps, generated and signed on an existing device.
+// No plaintext message, attachment key, or private key belongs in this model.
+model SupportHistoryKey {
+  id                 String             @id @default(uuid())
+  linkId             String
+  conversationId     String
+  messageId          String
+  targetDeviceId     String
+  sourceDeviceId     String
+  wrappedKey         Json
+  signature          String
+  createdAt          DateTime           @default(now())
+  link               SupportDeviceLink  @relation(fields: [linkId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, targetDeviceId])
+  @@index([targetDeviceId, conversationId])
+  @@index([linkId])
+}
+
+// Rate-limits code guessing even when no guessed code corresponds to a link.
+model SupportPairingAttempt {
+  id        String   @id @default(uuid())
+  accountId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// Shared user setting across all Eleeveon Hub sections, not one per chat.
+model HubUserAppearance {
+  userId         String   @id
+  accountId      String
+  backgroundKind String   @default("default")
+  backgroundKey  String?
+  updatedAt      DateTime @updatedAt
+
+  @@index([accountId])
+}
+
+model HubBackgroundImage {
+  id         String   @id @default(uuid())
+  userId     String
+  accountId  String
+  storageKey String   @unique
+  name       String
+  mimeType   String
+  sizeBytes  Int
+  createdAt  DateTime @default(now())
+
+  @@index([accountId, userId])
 }
