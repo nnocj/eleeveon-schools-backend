@@ -1,25 +1,14 @@
-/** Private Supabase Storage for Eleeveon Center chat attachments. */
+/** Private Supabase Storage for Eleeveon Center chat attachments and Hub backgrounds. */
 import { BadRequestException, Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
 
 export type SupportAttachment = {
-  name: string;
-  mimeType: string;
-  sizeBytes: number;
-  storageKey: string;
-  kind: "image" | "video" | "audio" | "document";
-  encrypted?: boolean;
+  name: string; mimeType: string; sizeBytes: number; storageKey: string;
+  kind: "image" | "video" | "audio" | "document"; encrypted?: boolean;
 };
-
-export type SupportFile = {
-  originalname?: string;
-  mimetype?: string;
-  size?: number;
-  buffer?: Buffer;
-};
-
+export type SupportFile = { originalname?: string; mimetype?: string; size?: number; buffer?: Buffer };
 const ALLOWED = new Map<string, string>([
   ["image/jpeg", ".jpg"], ["image/png", ".png"], ["image/webp", ".webp"],
   ["image/gif", ".gif"], ["image/avif", ".avif"],
@@ -37,12 +26,27 @@ const ALLOWED = new Map<string, string>([
   ["application/zip", ".zip"], ["application/x-zip-compressed", ".zip"],
 ]);
 
+function safeSegment(value: string): string { return value.replace(/[^a-zA-Z0-9_-]/g, "_"); }
+function sniffImage(buffer: Buffer): { mimeType: string; ext: string } | null {
+  if (buffer.length >= 8 && buffer.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))
+    return {mimeType:"image/png",ext:".png"};
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff)
+    return {mimeType:"image/jpeg",ext:".jpg"};
+  if (buffer.length >= 12 && buffer.toString("ascii",0,4) === "RIFF" && buffer.toString("ascii",8,12) === "WEBP")
+    return {mimeType:"image/webp",ext:".webp"};
+  if (buffer.length >= 6 && ["GIF87a","GIF89a"].includes(buffer.toString("ascii",0,6)))
+    return {mimeType:"image/gif",ext:".gif"};
+  if (buffer.length >= 12 && buffer.toString("ascii",4,8) === "ftyp" &&
+      ["avif","avis"].includes(buffer.toString("ascii",8,12)))
+    return {mimeType:"image/avif",ext:".avif"};
+  return null;
+}
+
 @Injectable()
 export class SupportStorageService {
   private readonly storage: SupabaseClient;
   private readonly bucket: string;
   readonly maxBytes: number;
-
   constructor(private readonly config: ConfigService) {
     const url = config.get<string>("SUPABASE_URL")?.trim();
     const secret = config.get<string>("SUPABASE_SECRET_KEY")?.trim();
@@ -62,9 +66,7 @@ export class SupportStorageService {
     if (!extension) throw new BadRequestException("This file type is not supported. Choose an image, audio, video, document or ZIP file.");
     if (file.buffer.length > this.maxBytes) throw new BadRequestException(`Attachment exceeds the ${Math.ceil(this.maxBytes / 1024 / 1024)} MB limit.`);
     const name = String(file.originalname || "attachment").replace(/[\\/\r\n\x00-\x1f]/g, "_").slice(0, 160);
-    const cleanAccountId = accountId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const cleanFeedbackId = feedbackId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const storageKey = `${cleanAccountId}/${cleanFeedbackId}/${randomUUID()}${extension}`;
+    const storageKey = `${safeSegment(accountId)}/${safeSegment(feedbackId)}/${randomUUID()}${extension}`;
     const { error } = await this.storage.storage.from(this.bucket).upload(storageKey, file.buffer, {
       contentType: mimeType, cacheControl: "3600", upsert: false,
     });
@@ -73,9 +75,8 @@ export class SupportStorageService {
     return { name: encrypted ? "encrypted.bin" : name, mimeType, sizeBytes: file.buffer.length, storageKey, kind, encrypted };
   }
 
-  // Large encrypted videos are uploaded directly to the private bucket, never buffered in Render.
   async reserveDirectUpload(accountId:string,feedbackId:string){
-    const storageKey=`${accountId.replace(/[^a-zA-Z0-9_-]/g,"_")}/${feedbackId.replace(/[^a-zA-Z0-9_-]/g,"_")}/${randomUUID()}.e2ee`;
+    const storageKey=`${safeSegment(accountId)}/${safeSegment(feedbackId)}/${randomUUID()}.e2ee`;
     const {data,error}=await this.storage.storage.from(this.bucket).createSignedUploadUrl(storageKey);
     if(error||!data?.signedUrl)throw new ServiceUnavailableException("Cannot prepare private media upload.");
     return {storageKey,signedUrl:data.signedUrl};
@@ -88,8 +89,28 @@ export class SupportStorageService {
     return {name:"encrypted.bin",mimeType:"application/octet-stream",sizeBytes:expectedBytes,storageKey,kind:"document",encrypted:true};
   }
 
+  /** Only for the authenticated user's Hub background (not E2EE chat media). */
+  async storeBackground(accountId: string, userId: string, file?: SupportFile) {
+    if (!file?.buffer?.length || !Buffer.isBuffer(file.buffer) || file.buffer.length > 6 * 1024 * 1024) {
+      throw new BadRequestException("Choose a non-empty image up to 6 MB.");
+    }
+    const sniffed = sniffImage(file.buffer);
+    if (!sniffed) throw new BadRequestException("Choose a valid PNG, JPG, WebP, GIF or AVIF image.");
+    const name = String(file.originalname || `Background${sniffed.ext}`).replace(/[\\/\r\n\x00-\x1f]/g, "_").slice(0, 120);
+    const storageKey = `${safeSegment(accountId)}/hub-backgrounds/${safeSegment(userId)}/${randomUUID()}${sniffed.ext}`;
+    const { error } = await this.storage.storage.from(this.bucket).upload(storageKey,file.buffer,
+      {contentType:sniffed.mimeType,cacheControl:"300",upsert:false});
+    if (error) throw new ServiceUnavailableException("Could not upload Hub background.");
+    return { storageKey, name, mimeType: sniffed.mimeType, sizeBytes: file.buffer.length };
+  }
+  async backgroundUrl(storageKey: string): Promise<string | null> {
+    const { data, error } = await this.storage.storage.from(this.bucket).createSignedUrl(storageKey, 600);
+    return error ? null : data?.signedUrl || null;
+  }
+
   async remove(storageKey:string):Promise<void>{
-    await this.storage.storage.from(this.bucket).remove([storageKey]);
+    const {error}=await this.storage.storage.from(this.bucket).remove([storageKey]);
+    if (error) throw new ServiceUnavailableException("Could not delete private media.");
   }
   async signedUrl(attachment: SupportAttachment): Promise<string | null> {
     const { data, error } = await this.storage.storage.from(this.bucket).createSignedUrl(
