@@ -367,7 +367,16 @@ export class SupportDeviceLinksService {
     const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), PER_PAGE_MAX) : 75;
     const before = asId(input.before);
     const deviceId = asId(input.deviceId);
-    if (deviceId) await this.linkedDevice(identity.accountId, identity.userId, deviceId);
+    // An authenticated conversation participant can read its stored
+    // ciphertext even before the current device is approved; the original
+    // support.open() endpoint already permits this. Crucially, transferred
+    // decryption keys remain restricted to APPROVED devices below.
+    const currentDevice = deviceId ? await this.prisma.supportEncryptionDevice.findFirst({
+      where: { id: deviceId, ...identity, revokedAt: null },
+      select: { id: true, linkedAt: true },
+    }) : null;
+    if (deviceId && !currentDevice) throw new ForbiddenException("Unknown or revoked encryption device.");
+    const eligibleForHistoricalKeys = Boolean(currentDevice?.linkedAt);
     let cursorMessage: {id:string; createdAt:Date}|null = null;
     if (before) {
       if (!UUID.test(before)) throw new BadRequestException("Invalid message cursor.");
@@ -396,11 +405,11 @@ export class SupportDeviceLinksService {
     const tombstones = new Set<string>(Array.isArray(conversationMetadata.supportDeletedMessageIds)
       ? conversationMetadata.supportDeletedMessageIds.filter((id): id is string => typeof id === "string") : []);
     const visiblePage = page.filter(message=>!hidden.has(message.id));
-    const historyKeys = deviceId && visiblePage.length ? await this.prisma.supportHistoryKey.findMany({
+    const historyKeys = eligibleForHistoricalKeys && visiblePage.length ? await this.prisma.supportHistoryKey.findMany({
       where: { targetDeviceId: deviceId, messageId: { in: visiblePage.filter(message=>!tombstones.has(message.id)).map(message => message.id) } },
       select: { messageId: true, sourceDeviceId: true, wrappedKey: true, signature: true, linkId: true },
     }) : [];
-    const openingHistoryKey = deviceId && !before ? await this.prisma.supportHistoryKey.findUnique({
+    const openingHistoryKey = eligibleForHistoricalKeys && !before ? await this.prisma.supportHistoryKey.findUnique({
       where: { messageId_targetDeviceId: { messageId: `${conversationId}-opening`, targetDeviceId: deviceId } },
       select: { messageId: true, sourceDeviceId: true, wrappedKey: true, signature: true, linkId: true },
     }) : null;
