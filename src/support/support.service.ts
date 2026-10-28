@@ -317,14 +317,23 @@ export class SupportService {
     const type = text(input.type, 60) || "support_request";
     const encrypted = input.encrypted === true;
     const requestedId = text(input.conversationId, 64);
+    // Hub v2 creates an empty encrypted conversation before the opening
+    // message can be encrypted (the recipient directory needs its ID).
+    // This is NOT permission to accept a plaintext message: the only
+    // unsigned case is a zero-length draft with an authenticated UUID.
+    const pendingEncryptedDraft = encrypted && input.pending === true && body.length === 0;
     if (encrypted) {
       if (!UUID_RE.test(requestedId)) throw new BadRequestException("An encrypted conversation ID is required.");
-      const envelope = decodeEnvelope(body, requestedId, `${requestedId}-opening`);
-      await this.verifyEncryptedAuthor(access, envelope);
+      if (!pendingEncryptedDraft) {
+        const envelope = decodeEnvelope(body, requestedId, `${requestedId}-opening`);
+        await this.verifyEncryptedAuthor(access, envelope);
+      }
     } else if (type === "support_request") {
       throw new BadRequestException("Support chats require end-to-end encryption. Please update the Eleeveon app.");
     }
-    if ((!subject && !encrypted) || !body) throw new BadRequestException("Enter a subject and message to start a conversation.");
+    if ((!subject && !encrypted) || (!body && !pendingEncryptedDraft)) {
+      throw new BadRequestException("Enter a subject and message to start a conversation.");
+    }
     if (!KINDS.has(type)) throw new BadRequestException("Unknown support category.");
     const requestedSchoolId = text(input.schoolId, 120);
     const requestedBranchId = text(input.branchId, 120);
@@ -357,7 +366,8 @@ export class SupportService {
         branchId: requestedBranchId || null,
         submittedByName: text(input.name, 180) || null,
         type, priority: "normal", status: "submitted", subject: encrypted ? "Encrypted support conversation" : subject, description: body,
-        metadata: { origin: "eleeveon_center", accountName: account?.name || "School", e2ee: encrypted },
+        metadata: { origin: "eleeveon_center", accountName: account?.name || "School", e2ee: encrypted,
+          ...(pendingEncryptedDraft ? { pendingRecipientKeys: true } : {}) },
       },
     });
     return { conversation: { ...created, organizationName: account?.name || "School" } };
@@ -424,6 +434,14 @@ export class SupportService {
       if(attachment&&!reservation)await this.storage.remove(attachment.storageKey).catch(()=>undefined);
       throw cause;
     }
+    // A successfully persisted encrypted reply clears the server's
+    // "first message pending" flag; preserve all other metadata keys.
+    await this.prisma.$executeRaw`
+      UPDATE "PlatformFeedback"
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"pendingRecipientKeys":false}'::jsonb
+      WHERE id = ${feedbackId}
+        AND metadata->>'pendingRecipientKeys' = 'true'
+    `;
     await this.prisma.platformFeedback.update({
       where: { id: feedbackId },
       data: access.platform && conversation.status === "submitted" ? { status: "acknowledged" } :
