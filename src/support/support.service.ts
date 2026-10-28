@@ -1,6 +1,7 @@
 /** Authenticated cross-account support conversations, backed by existing Prisma models. */
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthUser } from "../common/auth-user";
 import { SupportStorageService, type SupportAttachment, type SupportFile } from "./support-storage.service";
@@ -42,14 +43,14 @@ function asAttachments(value: unknown): SupportAttachment[] {
 }
 
 /** Per-user inbox settings live in existing PlatformFeedback.metadata (no new table). */
-function conversationPreference(metadata: unknown, userId: string): { title?: string; hiddenAt?: string; readAt?: string; hiddenMessageIds?: string[] } {
+function conversationPreference(metadata: unknown, userId: string): { title?: string; hiddenAt?: string } {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return {};
   const root = metadata as Record<string, unknown>;
   const all = root.supportChatPreferences;
   if (!all || typeof all !== "object" || Array.isArray(all)) return {};
   const item = (all as Record<string, unknown>)[userId];
   if (!item || typeof item !== "object" || Array.isArray(item)) return {};
-  return item as { title?: string; hiddenAt?: string; readAt?: string; hiddenMessageIds?: string[] };
+  return item as { title?: string; hiddenAt?: string };
 }
 
 @Injectable()
@@ -79,7 +80,7 @@ export class SupportService {
 
   private async verifyEncryptedAuthor(access: { accountId: string; userId: string }, envelope: any) {
     const sender = await this.prisma.supportEncryptionDevice.findUnique({ where: { id: envelope.fromDeviceId } });
-    if (!sender || sender.revokedAt || sender.userId !== access.userId || sender.accountId !== access.accountId) {
+    if (!sender || sender.revokedAt || !sender.linkedAt || sender.userId !== access.userId || sender.accountId !== access.accountId) {
       throw new ForbiddenException("The signing device is not registered for this user.");
     }
     const { signature, ...unsigned } = envelope;
@@ -108,14 +109,30 @@ export class SupportService {
       if (existing.userId !== access.userId || existing.accountId !== access.accountId || existing.revokedAt || existing.fingerprint !== keyFingerprint) {
         throw new ForbiddenException("This device identifier is already assigned or its public keys changed.");
       }
-      return { device: existing };
+      return { device: existing, linked: !!existing.linkedAt };
     }
-    const device = await this.prisma.supportEncryptionDevice.create({ data: {
-      id, accountId: access.accountId, userId: access.userId,
-      encryptionPublicJwk: encryptionPublicJwk as any, signingPublicJwk: signingPublicJwk as any,
-      fingerprint: keyFingerprint,
-    } });
-    return { device };
+    // Only the first-ever device can bootstrap itself. Further devices remain
+    // pending until an already-linked device signs an explicit pairing approval.
+    // Database uniqueness on userId+linkedAt is not suitable (many linked devices);
+    // the first-device bootstrap must be serialized with a per-user advisory lock.
+    const device = await this.prisma.$transaction(async tx => {
+      // PostgreSQL transaction-scoped lock, keyed to authenticated user UUID.
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${access.userId}))`;
+      const linkedCount = await tx.supportEncryptionDevice.count({
+        where: { accountId: access.accountId, userId: access.userId, linkedAt: { not: null }, revokedAt: null },
+      });
+      const everRegistered = await tx.supportEncryptionDevice.count({
+        where: { accountId: access.accountId, userId: access.userId },
+      });
+      return tx.supportEncryptionDevice.create({ data: {
+        id, accountId: access.accountId, userId: access.userId,
+        encryptionPublicJwk: encryptionPublicJwk as any, signingPublicJwk: signingPublicJwk as any,
+        fingerprint: keyFingerprint,
+        // NEVER self-approve a replacement device after revocation/loss.
+        linkedAt: linkedCount === 0 && everRegistered === 0 ? new Date() : null,
+      } });
+    });
+    return { device, linked: !!device.linkedAt };
   }
 
   async keys(actor: AuthUser, conversationId?: string) {
@@ -153,7 +170,12 @@ export class SupportService {
     }
     const ids=[...new Set([...recipientIds,...staffMemberships.map(r=>r.userId)].filter(Boolean))];
     if(ids.length>90)throw new BadRequestException("This recipient group is too large for the current encryption envelope; use a smaller group.");
-    const devices=ids.length?await this.prisma.supportEncryptionDevice.findMany({where:{userId:{in:ids}},orderBy:{registeredAt:"asc"},take:110}):[];
+    const devices=ids.length?await this.prisma.supportEncryptionDevice.findMany({
+      // Retain revoked public keys to validate OLD signed messages, but never
+      // expose unlinked/pending keys as encryption recipients.
+      where:{userId:{in:ids},OR:[{linkedAt:{not:null}},{revokedAt:{not:null}}]},
+      orderBy:{registeredAt:"asc"},take:110,
+    }):[];
     const audience=new Set(recipientIds);
     const platformUsers=new Set(staffMemberships.map(x=>x.userId));
     return {devices:devices.filter(d=>(audience.has(d.userId)&&d.accountId===customerAccountId)||
@@ -273,15 +295,24 @@ export class SupportService {
       where: { feedbackId, ...(access.platform ? {} : { internal: false }) },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 700,
     });
-    const hiddenIds = new Set(Array.isArray(preference.hiddenMessageIds) ? preference.hiddenMessageIds : []);
-    const metadata = (conversation.metadata && typeof conversation.metadata === "object" && !Array.isArray(conversation.metadata))
-      ? conversation.metadata as Record<string, unknown> : {};
-    const deletedIds = new Set(Array.isArray(metadata.supportDeletedMessageIds)
-      ? metadata.supportDeletedMessageIds.filter((id): id is string => typeof id === "string") : []);
-    const expanded = await Promise.all(messages.filter(m => !hiddenIds.has(m.id)).map(async message => ({
+    const hiddenRows = await this.prisma.$queryRaw<Array<{messageId: string}>>`
+      SELECT "messageId" FROM "SupportMessageHidden" WHERE "userId" = ${access.userId}
+    `;
+    const tombstones = await this.prisma.$queryRaw<Array<{messageId: string}>>`
+      SELECT "messageId" FROM "SupportMessageTombstone" WHERE "feedbackId" = ${feedbackId}
+    `;
+    const hiddenIds = new Set(hiddenRows.map(x => x.messageId));
+    const deletedIds = new Set(tombstones.map(x => x.messageId));
+    const visibleMessages = messages.filter(m => !hiddenIds.has(m.id));
+    const expanded = await Promise.all(visibleMessages.map(async (message) => ({
+      ...(deletedIds.has(message.id)
+        ? { ...message, body: "", attachments: [], deletedForEveryone: true }
+        : message),
       ...message,
-      ...(deletedIds.has(message.id) ? { body: "", deletedForEveryone: true } : {}),
-      attachments: deletedIds.has(message.id) ? [] : await this.expose(message.attachments),
+      attachments: deletedIds.has(message.id) ? [] : await Promise.all(asAttachments(message.attachments).map(async (item) => ({
+        name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes,
+        kind: item.kind, url: await this.storage.signedUrl(item),
+      }))),
     })));
     return { conversation: { ...conversation, organizationName: conversation.account?.name || "School", displayTitle }, messages: expanded };
   }
@@ -294,20 +325,14 @@ export class SupportService {
     const type = text(input.type, 60) || "support_request";
     const encrypted = input.encrypted === true;
     const requestedId = text(input.conversationId, 64);
-    const pending = encrypted && input.pending === true && !body;
     if (encrypted) {
       if (!UUID_RE.test(requestedId)) throw new BadRequestException("An encrypted conversation ID is required.");
-      // Pending secure chats are intentionally created BEFORE a recipient has registered
-      // encryption keys. No plaintext subject/message is saved while pending.
-      if (!pending) {
-        const envelope = decodeEnvelope(body, requestedId, `${requestedId}-opening`);
-        await this.verifyEncryptedAuthor(access, envelope);
-      }
+      const envelope = decodeEnvelope(body, requestedId, `${requestedId}-opening`);
+      await this.verifyEncryptedAuthor(access, envelope);
     } else if (type === "support_request") {
       throw new BadRequestException("Support chats require end-to-end encryption. Please update the Eleeveon app.");
     }
-    if (!pending && ((!subject && !encrypted) || !body))
-      throw new BadRequestException("Enter a subject and message to start a conversation.");
+    if ((!subject && !encrypted) || !body) throw new BadRequestException("Enter a subject and message to start a conversation.");
     if (!KINDS.has(type)) throw new BadRequestException("Unknown support category.");
     const requestedSchoolId = text(input.schoolId, 120);
     const requestedBranchId = text(input.branchId, 120);
@@ -473,7 +498,7 @@ export class SupportService {
     return { ok: true, feedbackId };
   }
 
-  /** Persist read cursor in the already existing PlatformFeedback.metadata. */
+  /** User-specific, persisted read state; never exposes decrypted message content. */
   async markRead(actor: AuthUser, feedbackId: string) {
     const { access } = await this.accessibleConversation(actor, feedbackId);
     const latest = await this.prisma.platformFeedbackMessage.findFirst({
@@ -482,18 +507,15 @@ export class SupportService {
     });
     const cutoff = latest?.createdAt || new Date();
     await this.prisma.$executeRaw`
-      UPDATE "PlatformFeedback" SET metadata = jsonb_set(
-        COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('supportChatPreferences', COALESCE(metadata->'supportChatPreferences', '{}'::jsonb)),
-        ARRAY['supportChatPreferences', ${access.userId}],
-        COALESCE(metadata->'supportChatPreferences'->${access.userId}, '{}'::jsonb)
-          || jsonb_build_object('readAt', GREATEST(COALESCE((metadata->'supportChatPreferences'->${access.userId}->>'readAt')::timestamptz, '-infinity'::timestamptz), ${cutoff}::timestamptz)),
-        true
-      ) WHERE id = ${feedbackId}
+      INSERT INTO "SupportMessageRead" ("feedbackId", "userId", "readAt")
+      VALUES (${feedbackId}, ${access.userId}, ${cutoff})
+      ON CONFLICT ("feedbackId", "userId")
+      DO UPDATE SET "readAt" = GREATEST("SupportMessageRead"."readAt", EXCLUDED."readAt")
     `;
     return { ok: true, feedbackId, readAt: cutoff };
   }
 
-  /** Unread counts without any additional PostgreSQL support tables. */
+  /** Counts are strictly authorized and ignore own/hidden/deleted messages. */
   async unread(actor: AuthUser) {
     const access = await this.authorize(actor);
     const rows = await this.prisma.platformFeedback.findMany({
@@ -505,54 +527,39 @@ export class SupportService {
       await this.permittedTarget(access.accountId, access.userId, row) ? row : null
     ))).filter((row): row is NonNullable<typeof row> => row !== null);
     const visible = allowed.filter(row => !conversationPreference(row.metadata, access.userId).hiddenAt);
-    if (!visible.length) return { total: 0, conversations: [] as Array<{ id: string; unreadCount: number }> };
-    const metadataById = new Map(visible.map(row => [row.id, conversationPreference(row.metadata, access.userId)]));
-    const deletedById = new Map(visible.map(row => {
-      const meta = (row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata))
-        ? row.metadata as Record<string, unknown> : {};
-      return [row.id, new Set(Array.isArray(meta.supportDeletedMessageIds)
-        ? meta.supportDeletedMessageIds.filter((id): id is string => typeof id === "string") : [])] as const;
-    }));
-    const messages = await this.prisma.platformFeedbackMessage.findMany({
-      where: { feedbackId: { in: visible.map(row => row.id) }, internal: false },
-      select: { id: true, feedbackId: true, authorUserId: true, createdAt: true },
-    });
-    const counts = new Map(visible.map(row => [row.id, 0]));
-    for (const message of messages) {
-      if (message.authorUserId === access.userId) continue;
-      const pref = metadataById.get(message.feedbackId);
-      const readAtMs = pref?.readAt ? Date.parse(pref.readAt) : NaN;
-      if (Number.isFinite(readAtMs) && message.createdAt.getTime() <= readAtMs) continue;
-      if (pref?.hiddenMessageIds?.includes(message.id)) continue;
-      if (deletedById.get(message.feedbackId)?.has(message.id)) continue;
-      counts.set(message.feedbackId, (counts.get(message.feedbackId) || 0) + 1);
-    }
-    const conversations = visible.map(row => ({ id: row.id, unreadCount: counts.get(row.id) || 0 }));
-    return { total: conversations.reduce((sum, row) => sum + row.unreadCount, 0), conversations };
+    if (!visible.length) return { total: 0, conversations: [] as Array<{id:string;unreadCount:number}> };
+    const ids = visible.map(x => x.id);
+    const counts = await this.prisma.$queryRaw<Array<{ feedbackId: string; count: bigint }>>`
+      SELECT m."feedbackId" AS "feedbackId", COUNT(*)::bigint AS count
+      FROM "PlatformFeedbackMessage" m
+      LEFT JOIN "SupportMessageRead" r ON r."feedbackId" = m."feedbackId" AND r."userId" = ${access.userId}
+      LEFT JOIN "SupportMessageHidden" h ON h."messageId" = m.id AND h."userId" = ${access.userId}
+      LEFT JOIN "SupportMessageTombstone" t ON t."messageId" = m.id
+      WHERE m."feedbackId" IN (${Prisma.join(ids)})
+        AND m.internal = false
+        AND (m."authorUserId" IS NULL OR m."authorUserId" <> ${access.userId})
+        AND (r."readAt" IS NULL OR m."createdAt" > r."readAt")
+        AND h."messageId" IS NULL AND t."messageId" IS NULL
+      GROUP BY m."feedbackId"
+    `;
+    const byId = new Map(counts.map(x => [x.feedbackId, Number(x.count)]));
+    const conversations = visible.map(x => ({ id: x.id, unreadCount: byId.get(x.id) || 0 }));
+    return { total: conversations.reduce((sum, x) => sum + x.unreadCount, 0), conversations };
   }
 
-  /** Per-user message hiding using existing conversation metadata. */
+  /** Hide for one account user across all their devices; does not delete others' messages. */
   async deleteForMe(actor: AuthUser, feedbackId: string, messageId: string) {
     const { access } = await this.accessibleConversation(actor, feedbackId);
-    const message = await this.prisma.platformFeedbackMessage.findFirst({
-      where: { id: messageId, feedbackId, internal: false }, select: { id: true },
-    });
+    const message = await this.prisma.platformFeedbackMessage.findFirst({ where: { id: messageId, feedbackId, internal: false }, select: { id: true } });
     if (!message) throw new NotFoundException("Message not found.");
     await this.prisma.$executeRaw`
-      UPDATE "PlatformFeedback" SET metadata = jsonb_set(
-        COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('supportChatPreferences', COALESCE(metadata->'supportChatPreferences', '{}'::jsonb)),
-        ARRAY['supportChatPreferences', ${access.userId}],
-        COALESCE(metadata->'supportChatPreferences'->${access.userId}, '{}'::jsonb)
-          || jsonb_build_object('hiddenMessageIds',
-            (SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
-             FROM jsonb_array_elements_text(COALESCE(metadata->'supportChatPreferences'->${access.userId}->'hiddenMessageIds', '[]'::jsonb) || jsonb_build_array(${messageId})) AS items(value))),
-        true
-      ) WHERE id = ${feedbackId}
+      INSERT INTO "SupportMessageHidden" ("messageId", "userId") VALUES (${messageId}, ${access.userId})
+      ON CONFLICT ("messageId", "userId") DO NOTHING
     `;
     return { ok: true, messageId, scope: "me" };
   }
 
-  /** Sender-only deletion: destroy ciphertext while retaining a tombstone marker in the existing conversation metadata. */
+  /** Sender-only global deletion: clear ciphertext, attachment references and create tombstone. */
   async deleteForEveryone(actor: AuthUser, feedbackId: string, messageId: string) {
     const { access } = await this.accessibleConversation(actor, feedbackId);
     const message = await this.prisma.platformFeedbackMessage.findFirst({
@@ -563,16 +570,14 @@ export class SupportService {
     const attachments = asAttachments(message.attachments);
     await this.prisma.$transaction(async tx => {
       await tx.$executeRaw`
-        UPDATE "PlatformFeedback" SET metadata = jsonb_set(
-          COALESCE(metadata, '{}'::jsonb), '{supportDeletedMessageIds}',
-          (SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
-           FROM jsonb_array_elements_text(COALESCE(metadata->'supportDeletedMessageIds', '[]'::jsonb) || jsonb_build_array(${messageId})) AS items(value)),
-          true
-        ) WHERE id = ${feedbackId}
+        INSERT INTO "SupportMessageTombstone" ("messageId", "feedbackId", "deletedByUserId")
+        VALUES (${messageId}, ${feedbackId}, ${access.userId})
+        ON CONFLICT ("messageId") DO NOTHING
       `;
       await tx.platformFeedbackMessage.update({ where: { id: messageId }, data: { body: "", attachments: [] } });
     });
-    await Promise.allSettled(attachments.map(item => this.storage.remove(item.storageKey)));
+    // Storage deletion is best-effort; a scheduled orphan cleanup should retry failures.
+    await Promise.allSettled(attachments.map(a => this.storage.remove(a.storageKey)));
     return { ok: true, messageId, scope: "everyone" };
   }
 }
