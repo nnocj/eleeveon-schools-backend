@@ -336,8 +336,15 @@ export class SupportDeviceLinksService {
     for (const candidate of slice) {
       try {
         await this.support.assertConversationAccess(actor, candidate.id);
+        const preferenceRoot = candidate.metadata && typeof candidate.metadata === "object" && !Array.isArray(candidate.metadata)
+          ? (candidate.metadata as Record<string, any>).supportChatPreferences : undefined;
+        const myPreference = preferenceRoot && typeof preferenceRoot === "object"
+          ? preferenceRoot[identity.userId] : undefined;
+        // Match SupportService.list(): removed conversations stay removed from ALL history pages.
+        if (myPreference?.hiddenAt) continue;
         const { messages, account, ...record } = candidate;
-        allowed.push({ ...record, organizationName: account?.name || "School",
+        allowed.push({ ...record, displayTitle: myPreference?.title || null,
+          organizationName: account?.name || "School",
           lastMessage: messages[0] ? { body: messages[0].body,
             createdAt: messages[0].createdAt, authorType: messages[0].authorType } : null });
       } catch (error) {
@@ -352,6 +359,10 @@ export class SupportDeviceLinksService {
   async messagePage(actor: AuthUser, conversationId: string, input: { before?: string; limit?: string; deviceId?: string }) {
     const identity = await this.account(actor);
     await this.support.assertConversationAccess(actor, conversationId);
+    const conversation = await this.prisma.platformFeedback.findUnique({where:{id:conversationId},select:{metadata:true}});
+    const preferences = conversation?.metadata && typeof conversation.metadata === "object" && !Array.isArray(conversation.metadata)
+      ? (conversation.metadata as Record<string,any>).supportChatPreferences : null;
+    if (preferences?.[identity.userId]?.hiddenAt) throw new NotFoundException("Conversation removed from your inbox.");
     const requested = Number(input.limit || 75);
     const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), PER_PAGE_MAX) : 75;
     const before = asId(input.before);
@@ -373,16 +384,30 @@ export class SupportDeviceLinksService {
     });
     const hasMore = messages.length > limit;
     const page = messages.slice(0, limit);
-    const historyKeys = deviceId && page.length ? await this.prisma.supportHistoryKey.findMany({
-      where: { targetDeviceId: deviceId, messageId: { in: page.map(message => message.id) } },
+    // Honor exactly the same user-specific hide and global tombstone policies as SupportService.open().
+    // Existing tables only: per-user visibility and global tombstones are
+    // stored in PlatformFeedback.metadata. This matches SupportService.open().
+    const conversationMetadata: Record<string, unknown> = conversation?.metadata &&
+      typeof conversation.metadata === "object" && !Array.isArray(conversation.metadata)
+        ? conversation.metadata as Record<string, unknown> : {};
+    const myPreference = preferences?.[identity.userId] as Record<string, unknown> | undefined;
+    const hidden = new Set<string>(Array.isArray(myPreference?.hiddenMessageIds)
+      ? myPreference.hiddenMessageIds.filter((id): id is string => typeof id === "string") : []);
+    const tombstones = new Set<string>(Array.isArray(conversationMetadata.supportDeletedMessageIds)
+      ? conversationMetadata.supportDeletedMessageIds.filter((id): id is string => typeof id === "string") : []);
+    const visiblePage = page.filter(message=>!hidden.has(message.id));
+    const historyKeys = deviceId && visiblePage.length ? await this.prisma.supportHistoryKey.findMany({
+      where: { targetDeviceId: deviceId, messageId: { in: visiblePage.filter(message=>!tombstones.has(message.id)).map(message => message.id) } },
       select: { messageId: true, sourceDeviceId: true, wrappedKey: true, signature: true, linkId: true },
     }) : [];
     const openingHistoryKey = deviceId && !before ? await this.prisma.supportHistoryKey.findUnique({
       where: { messageId_targetDeviceId: { messageId: `${conversationId}-opening`, targetDeviceId: deviceId } },
       select: { messageId: true, sourceDeviceId: true, wrappedKey: true, signature: true, linkId: true },
     }) : null;
-    const attachments = await Promise.all(page.map(async message => ({
-      ...message, attachments: await Promise.all(asAttachments(message.attachments).map(async attachment => ({
+    const attachments = await Promise.all(visiblePage.map(async message => ({
+      ...message,
+      ...(tombstones.has(message.id) ? { body: "", deletedForEveryone: true } : {}),
+      attachments: tombstones.has(message.id) ? [] : await Promise.all(asAttachments(message.attachments).map(async attachment => ({
         name: attachment.name, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes,
         kind: attachment.kind, url: await this.storage.signedUrl(attachment),
       }))),
