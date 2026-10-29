@@ -53,6 +53,26 @@ export class SupportController {
   @Get("conversations/history-pages") inboxHistoryPage(@Req() req:RequestWithUser,@Query("before") before?:string,@Query("limit") limit?:string){return this.links.conversationPage(req.user,{before,limit});}
   @Get("conversations/:id") open(@Req() req:RequestWithUser,@Param("id") id:string){return this.support.open(req.user,id);}
   @Post("conversations/:id/read") markRead(@Req() req:RequestWithUser,@Param("id") id:string){return this.support.markRead(req.user,id);}
+  // Personal conversation title; updates metadata without changing ciphertext.
+  @Patch("conversations/:id/title")
+  renameConversation(
+    @Req() req: RequestWithUser,
+    @Param("id") id: string,
+    @Body("title") title: string,
+  ) {
+    return this.support.renameConversation(req.user, id, title);
+  }
+
+  // Hide a conversation only for the requesting user; do not erase other
+  // participants' encrypted history.
+  @Delete("conversations/:id")
+  removeConversation(
+    @Req() req: RequestWithUser,
+    @Param("id") id: string,
+  ) {
+    return this.support.removeConversation(req.user, id);
+  }
+
   @Delete("conversations/:id/messages/:messageId") deleteMessage(@Req() req:RequestWithUser,@Param("id") id:string,@Param("messageId") messageId:string,@Query("scope") scope?:string){
     return scope === "everyone" ? this.support.deleteForEveryone(req.user,id,messageId) : scope === "me" ? this.support.deleteForMe(req.user,id,messageId) : (()=>{throw new BadRequestException("Scope must be me or everyone");})();
   }
