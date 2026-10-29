@@ -8,9 +8,9 @@ export class MoneyDto {
 }
 
 export class CreatePayrollProfileDto extends MoneyDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
-  @IsOptional() @Type(() => Number) @IsNumber() teacherId?: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
+  @IsOptional() @IsString() teacherId?: string;
   @IsOptional() @IsString() staffUserId?: string;
   @IsString() fullName!: string;
   @IsOptional() @IsString() role?: string;
@@ -28,8 +28,8 @@ export class CreatePayrollProfileDto extends MoneyDto {
 }
 
 export class CreatePayrollRunDto extends MoneyDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
   @IsString() title!: string;
   @IsOptional() @IsString() description?: string;
   @IsString() periodStart!: string;
@@ -39,11 +39,11 @@ export class CreatePayrollRunDto extends MoneyDto {
 }
 
 export class CreatePayrollItemDto extends MoneyDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
-  @Type(() => Number) @IsNumber() payrollRunId!: number;
-  @IsOptional() @Type(() => Number) @IsNumber() payrollProfileId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() teacherId?: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
+  @IsString() payrollRunId!: string;
+  @IsOptional() @IsString() payrollProfileId?: string;
+  @IsOptional() @IsString() teacherId?: string;
   @IsOptional() @IsString() staffUserId?: string;
   @IsString() fullName!: string;
   @IsOptional() @IsString() role?: string;

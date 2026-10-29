@@ -9,12 +9,12 @@ export class MoneyDto {
 }
 
 export class CreateStudentFeeInvoiceDto extends MoneyDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
-  @Type(() => Number) @IsNumber() studentId!: number;
-  @IsOptional() @Type(() => Number) @IsNumber() classId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() academicStructureId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() academicPeriodId?: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
+  @IsString() studentId!: string;
+  @IsOptional() @IsString() classId?: string;
+  @IsOptional() @IsString() academicStructureId?: string;
+  @IsOptional() @IsString() academicPeriodId?: string;
   @IsOptional() @IsString() invoiceNumber?: string;
   @IsOptional() items?: Array<{ name: string; amount: number; description?: string; required?: boolean }>;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) subtotal?: number;
@@ -35,11 +35,11 @@ export class UpdateStudentFeeInvoiceDto {
 }
 
 export class CreateStudentFeePaymentDto extends MoneyDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
-  @IsOptional() @Type(() => Number) @IsNumber() invoiceId?: number;
-  @Type(() => Number) @IsNumber() studentId!: number;
-  @IsOptional() @Type(() => Number) @IsNumber() parentId?: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
+  @IsOptional() @IsString() invoiceId?: string;
+  @IsString() studentId!: string;
+  @IsOptional() @IsString() parentId?: string;
   @Type(() => Number) @IsNumber() @Min(0) amount!: number;
   @IsIn(["cash", "momo", "bank", "card", "manual"]) method!: string;
   @IsOptional() @IsString() provider?: string;
@@ -54,8 +54,8 @@ export class CreateStudentFeePaymentDto extends MoneyDto {
 }
 
 export class CreateCurrencySettingDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
   @IsString() currencyCode!: string;
   @IsString() currencySymbol!: string;
   @IsString() currencyName!: string;
@@ -73,22 +73,14 @@ export class CreateCurrencySettingDto {
  */
 
 export class InitiateStudentFeePaymentDto extends MoneyDto {
-  @Type(() => Number)
-  @IsNumber()
-  schoolId!: number;
+  @IsString() schoolId!: string;
 
-  @Type(() => Number)
-  @IsNumber()
-  branchId!: number;
+  @IsString() branchId!: string;
 
-  @Type(() => Number)
-  @IsNumber()
-  studentId!: number;
+  @IsString() studentId!: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  invoiceId?: number;
+  @IsString() invoiceId?: string;
 
   @Type(() => Number)
   @IsNumber()
@@ -137,13 +129,9 @@ export class ConfirmStudentFeePaymentDto {
  */
 
 export class InitiateWithdrawalDto extends MoneyDto {
-  @Type(() => Number)
-  @IsNumber()
-  schoolId!: number;
+  @IsString() schoolId!: string;
 
-  @Type(() => Number)
-  @IsNumber()
-  branchId!: number;
+  @IsString() branchId!: string;
 
   @Type(() => Number)
   @IsNumber()

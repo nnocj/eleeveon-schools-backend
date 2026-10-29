@@ -12,8 +12,8 @@ export function assertSameAccountOrDeveloper(user: AuthUser, accountId?: string 
 export function userCanAccessSchoolBranch(args: {
   user: AuthUser;
   role?: string | null;
-  schoolId?: number | null;
-  branchId?: number | null;
+  schoolId?: string | null;
+  branchId?: string | null;
 }) {
   const role = normalizeRole(args.role || args.user.role);
   if (!role) return false;
@@ -25,9 +25,9 @@ export function userCanAccessSchoolBranch(args: {
     if (normalizeRole(membership.role) !== role) return false;
 
     const schoolMatches =
-      !args.schoolId || !membership.schoolId || Number(membership.schoolId) === Number(args.schoolId);
+      !args.schoolId || !membership.schoolId || String(membership.schoolId) === String(args.schoolId);
     const branchMatches =
-      !args.branchId || !membership.branchId || Number(membership.branchId) === Number(args.branchId);
+      !args.branchId || !membership.branchId || String(membership.branchId) === String(args.branchId);
 
     return schoolMatches && branchMatches;
   });

@@ -56,8 +56,8 @@ export type OperationalTableName =
   | "notificationTemplates";
 
 export type ScopeFilter = {
-  schoolId?: number;
-  branchId?: number;
+  schoolId?: string;
+  branchId?: string;
   includeDeleted?: boolean;
 };
 
@@ -72,8 +72,8 @@ export class RecordStoreService {
   private assertScope(user: AuthUser, payload: any) {
     assertSameAccountOrDeveloper(user, payload?.accountId || user.accountId);
 
-    const schoolId = payload?.schoolId == null ? undefined : Number(payload.schoolId);
-    const branchId = payload?.branchId == null ? undefined : Number(payload.branchId);
+    const schoolId = payload?.schoolId == null ? undefined : String(payload.schoolId);
+    const branchId = payload?.branchId == null ? undefined : String(payload.branchId);
 
     if (!userCanAccessSchoolBranch({ user, schoolId, branchId })) {
       throw new ForbiddenException("You cannot access this school branch.");
@@ -121,8 +121,8 @@ export class RecordStoreService {
       .map((record) => this.recordToPayload(record))
       .filter((payload: any) => {
         if (!scope.includeDeleted && payload.isDeleted) return false;
-        if (scope.schoolId != null && Number(payload.schoolId) !== Number(scope.schoolId)) return false;
-        if (scope.branchId != null && Number(payload.branchId) !== Number(scope.branchId)) return false;
+        if (scope.schoolId != null && String(payload.schoolId) !== String(scope.schoolId)) return false;
+        if (scope.branchId != null && String(payload.branchId) !== String(scope.branchId)) return false;
         return userCanAccessSchoolBranch({
           user,
           schoolId: payload.schoolId,

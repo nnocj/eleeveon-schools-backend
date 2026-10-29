@@ -14,12 +14,12 @@ export class PayrollController {
 
   @Get("dashboard")
   dashboard(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.dashboard(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.dashboard(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Get("profiles")
   listProfiles(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listProfiles(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listProfiles(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("profiles")
@@ -34,7 +34,7 @@ export class PayrollController {
 
   @Get("runs")
   listRuns(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listRuns(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listRuns(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("runs")
@@ -49,7 +49,7 @@ export class PayrollController {
 
   @Get("items")
   listItems(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listItems(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listItems(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("items")

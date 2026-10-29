@@ -78,8 +78,8 @@ type TransferDestination = {
 };
 
 type InitiateTransferDto = {
-  schoolId?: number;
-  branchId?: number;
+  schoolId?: string;
+  branchId?: string;
   amount: number;
   currencyCode?: string;
   reason?: string;
@@ -116,7 +116,7 @@ export class PaymentGatewayService {
     private readonly config: ConfigService
   ) {}
 
-  listIntents(user: AuthUser, schoolId?: number, branchId?: number) {
+  listIntents(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "paymentIntents", { schoolId, branchId });
   }
 
@@ -147,7 +147,7 @@ export class PaymentGatewayService {
     });
   }
 
-  listTransactions(user: AuthUser, schoolId?: number, branchId?: number) {
+  listTransactions(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "paymentTransactions", { schoolId, branchId });
   }
 

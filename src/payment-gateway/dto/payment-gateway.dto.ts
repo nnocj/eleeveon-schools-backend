@@ -28,13 +28,9 @@ export class MoneyDto {
 }
 
 export class CreatePaymentIntentDto extends MoneyDto {
-  @Type(() => Number)
-  @IsNumber()
-  schoolId!: number;
+  @IsString() schoolId!: string;
 
-  @Type(() => Number)
-  @IsNumber()
-  branchId!: number;
+  @IsString() branchId!: string;
 
   @IsIn(["student_fee", "subscription", "income", "payroll", "other"])
   purpose!: "student_fee" | "subscription" | "income" | "payroll" | "other";
@@ -52,39 +48,25 @@ export class CreatePaymentIntentDto extends MoneyDto {
   provider?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  studentId?: number;
+  @IsString() studentId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  parentId?: number;
+  @IsString() parentId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  teacherId?: number;
+  @IsString() teacherId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  feeInvoiceId?: number;
+  @IsString() feeInvoiceId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  incomeId?: number;
+  @IsString() incomeId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  payrollRunId?: number;
+  @IsString() payrollRunId?: string;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  payrollItemId?: number;
+  @IsString() payrollItemId?: string;
 
   @IsOptional()
   @IsString()
@@ -136,13 +118,9 @@ export class UpdatePaymentIntentDto {
 }
 
 export class CreatePaymentTransactionDto extends MoneyDto {
-  @Type(() => Number)
-  @IsNumber()
-  schoolId!: number;
+  @IsString() schoolId!: string;
 
-  @Type(() => Number)
-  @IsNumber()
-  branchId!: number;
+  @IsString() branchId!: string;
 
   @IsIn(["student_fee", "subscription", "income", "expense", "payroll", "refund", "other"])
   purpose!: string;

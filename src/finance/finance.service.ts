@@ -48,8 +48,8 @@ import {
 type AnyRecord = Record<string, any>;
 
 type InitiateStudentFeePaymentDto = {
-  schoolId: number;
-  branchId: number;
+  schoolId: string;
+  branchId: string;
   invoiceId?: string | number;
   amount?: number;
   method?: string;
@@ -79,8 +79,8 @@ type ConfirmStudentFeePaymentDto = {
 };
 
 type InitiateWithdrawalDto = {
-  schoolId: number;
-  branchId: number;
+  schoolId: string;
+  branchId: string;
   amount: number;
   currencyCode?: string;
   reason?: string;
@@ -143,7 +143,7 @@ export class FinanceService {
     private readonly payments: PaymentGatewayService
   ) {}
 
-  async dashboard(user: AuthUser, schoolId?: number, branchId?: number) {
+  async dashboard(user: AuthUser, schoolId?: string, branchId?: string) {
     const [invoices, feePayments, transactions, currencySettings] = await Promise.all([
       this.records.list(user, "studentFeeInvoices", { schoolId, branchId }),
       this.records.list(user, "studentFeePayments", { schoolId, branchId }),
@@ -176,7 +176,7 @@ export class FinanceService {
     };
   }
 
-  listInvoices(user: AuthUser, schoolId?: number, branchId?: number) {
+  listInvoices(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "studentFeeInvoices", { schoolId, branchId });
   }
 
@@ -289,7 +289,7 @@ export class FinanceService {
     return this.records.softDelete(user, "studentFeeInvoices", id);
   }
 
-  listFeePayments(user: AuthUser, schoolId?: number, branchId?: number) {
+  listFeePayments(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "studentFeePayments", { schoolId, branchId });
   }
 
@@ -302,7 +302,24 @@ export class FinanceService {
       throw new BadRequestException("Payment amount must be greater than zero.");
     }
 
-    const currentBalance = toNumber(invoice.balance || invoice.total);
+    // Stop accidental repeat submissions before creating payment/transaction rows.
+    // This is not an atomic idempotency guarantee across concurrent devices.
+    const priorPayments = await this.listInvoicePayments(user, invoiceId);
+    const reference = String(dto.referenceNumber || dto.providerReference || "").trim();
+    const receipt = String(dto.receiptNumber || "").trim();
+    if (!reference && !receipt) {
+      throw new BadRequestException("A unique payment reference or receipt number is required.");
+    }
+    if (priorPayments.some((entry: any) =>
+      (reference && [entry.referenceNumber, entry.providerReference].some((v) => String(v || "").trim() === reference)) ||
+      (receipt && String(entry.receiptNumber || "").trim() === receipt)
+    )) {
+      throw new BadRequestException("A fee payment with this reference already exists for this invoice.");
+    }
+    const alreadyPaid = priorPayments.filter((entry: any) => entry.isDeleted !== true &&
+      !["failed", "cancelled", "reversed", "refunded"].includes(String(entry.status || "paid").toLowerCase()))
+      .reduce((sum: number, entry: any) => sum + toNumber(entry.amount), 0);
+    const currentBalance = Math.max(0, toNumber(invoice.total) - alreadyPaid);
     if (amount > currentBalance) {
       throw new BadRequestException("Payment amount cannot be greater than the invoice balance.");
     }
@@ -498,7 +515,7 @@ export class FinanceService {
     };
   }
 
-  async wallet(user: AuthUser, schoolId?: number, branchId?: number) {
+  async wallet(user: AuthUser, schoolId?: string, branchId?: string) {
     const [transactions, withdrawals, payoutSettings, feePayments] = await Promise.all([
       this.records.list(user, "paymentTransactions", { schoolId, branchId }),
       this.records.list(user, "withdrawalRequests", { schoolId, branchId }),
@@ -624,7 +641,7 @@ export class FinanceService {
     };
   }
 
-  listCurrencySettings(user: AuthUser, schoolId?: number, branchId?: number) {
+  listCurrencySettings(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "schoolCurrencySettings", { schoolId, branchId });
   }
 

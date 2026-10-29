@@ -19,7 +19,7 @@ export class PaymentGatewayController {
 
   @Get("intents")
   listIntents(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listIntents(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listIntents(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("intents")
@@ -39,7 +39,7 @@ export class PaymentGatewayController {
 
   @Get("transactions")
   listTransactions(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listTransactions(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listTransactions(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("transactions")

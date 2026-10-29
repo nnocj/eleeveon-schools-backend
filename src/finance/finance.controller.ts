@@ -53,19 +53,19 @@ export class FinanceController {
   @Get("dashboard")
   @Roles(...FINANCE_ROLES)
   dashboard(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.dashboard(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.dashboard(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Get("wallet")
   @Roles(...FINANCE_ROLES)
   wallet(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.wallet(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.wallet(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Get("fee-invoices")
   @Roles(...FINANCE_ROLES)
   listInvoices(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listInvoices(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listInvoices(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("fee-invoices")
@@ -89,7 +89,7 @@ export class FinanceController {
   @Get("fee-payments")
   @Roles(...FINANCE_ROLES)
   listPayments(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listFeePayments(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listFeePayments(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("fee-payments")
@@ -129,7 +129,7 @@ export class FinanceController {
   @Get("currency-settings")
   @Roles(...FINANCE_ROLES)
   listCurrencySettings(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listCurrencySettings(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listCurrencySettings(req.user, schoolId ? schoolId : undefined, branchId ? branchId : undefined);
   }
 
   @Post("currency-settings")

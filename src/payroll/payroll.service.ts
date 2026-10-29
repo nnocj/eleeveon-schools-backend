@@ -11,7 +11,7 @@ export class PayrollService {
     private readonly payments: PaymentGatewayService
   ) {}
 
-  async dashboard(user: AuthUser, schoolId?: number, branchId?: number) {
+  async dashboard(user: AuthUser, schoolId?: string, branchId?: string) {
     const [profiles, runs, items, payments] = await Promise.all([
       this.records.list(user, "staffPayrollProfiles", { schoolId, branchId }),
       this.records.list(user, "payrollRuns", { schoolId, branchId }),
@@ -29,7 +29,7 @@ export class PayrollService {
     };
   }
 
-  listProfiles(user: AuthUser, schoolId?: number, branchId?: number) {
+  listProfiles(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "staffPayrollProfiles", { schoolId, branchId });
   }
 
@@ -47,7 +47,7 @@ export class PayrollService {
     return this.records.update(user, "staffPayrollProfiles", id, dto);
   }
 
-  listRuns(user: AuthUser, schoolId?: number, branchId?: number) {
+  listRuns(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "payrollRuns", { schoolId, branchId });
   }
 
@@ -74,7 +74,7 @@ export class PayrollService {
     return this.records.update(user, "payrollRuns", id, patch);
   }
 
-  listItems(user: AuthUser, schoolId?: number, branchId?: number) {
+  listItems(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "payrollItems", { schoolId, branchId });
   }
 
@@ -99,6 +99,19 @@ export class PayrollService {
 
   async payItem(user: AuthUser, id: string, dto: PayPayrollItemDto) {
     const item = await this.records.get(user, "payrollItems", id) as any;
+    if (!item || item.isDeleted === true) throw new Error("Payroll item not found.");
+    const existingPayments = await this.records.list(user, "staffPaymentRecords", {
+      schoolId: item.schoolId, branchId: item.branchId,
+    });
+    const itemKey = String(item.id || item.cloudRecordId || id);
+    if (String(item.status || "").toLowerCase() === "paid" || existingPayments.some((entry: any) =>
+      entry.isDeleted !== true &&
+      String(entry.payrollItemId || "") === itemKey &&
+      !["cancelled", "failed", "reversed"].includes(String(entry.status || "paid").toLowerCase())
+    )) throw new Error("Payroll item already paid; duplicate payment refused.");
+    if (!String(dto.referenceNumber || dto.receiptNumber || "").trim()) {
+      throw new Error("Payment reference or receipt number required.");
+    }
 
     const payment = await this.records.create(user, "staffPaymentRecords", {
       schoolId: item.schoolId,
