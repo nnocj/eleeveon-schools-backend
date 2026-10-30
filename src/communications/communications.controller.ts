@@ -14,12 +14,12 @@ export class CommunicationsController {
 
   @Get("dashboard")
   dashboard(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.dashboard(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.dashboard(req.user, schoolId || undefined, branchId || undefined);
   }
 
   @Get("announcements")
   listAnnouncements(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listAnnouncements(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listAnnouncements(req.user, schoolId || undefined, branchId || undefined);
   }
 
   @Post("announcements")
@@ -39,7 +39,7 @@ export class CommunicationsController {
 
   @Get("threads")
   listThreads(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listThreads(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listThreads(req.user, schoolId || undefined, branchId || undefined);
   }
 
   @Post("threads")
@@ -49,7 +49,7 @@ export class CommunicationsController {
 
   @Get("messages")
   listMessages(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listMessages(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listMessages(req.user, schoolId || undefined, branchId || undefined);
   }
 
   @Post("messages")
@@ -59,7 +59,7 @@ export class CommunicationsController {
 
   @Get("templates")
   listTemplates(@Req() req: any, @Query("schoolId") schoolId?: string, @Query("branchId") branchId?: string) {
-    return this.service.listTemplates(req.user, schoolId ? Number(schoolId) : undefined, branchId ? Number(branchId) : undefined);
+    return this.service.listTemplates(req.user, schoolId || undefined, branchId || undefined);
   }
 
   @Post("templates")

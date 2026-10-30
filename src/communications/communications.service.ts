@@ -7,7 +7,7 @@ import { CreateAnnouncementDto, CreateAnnouncementRecipientDto, CreateMessageDto
 export class CommunicationsService {
   constructor(private readonly records: RecordStoreService) {}
 
-  async dashboard(user: AuthUser, schoolId?: number, branchId?: number) {
+  async dashboard(user: AuthUser, schoolId?: string, branchId?: string) {
     const [announcements, recipients, threads, messages, logs] = await Promise.all([
       this.records.list(user, "announcements", { schoolId, branchId }),
       this.records.list(user, "announcementRecipients", { schoolId, branchId }),
@@ -26,7 +26,7 @@ export class CommunicationsService {
     };
   }
 
-  listAnnouncements(user: AuthUser, schoolId?: number, branchId?: number) {
+  listAnnouncements(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "announcements", { schoolId, branchId });
   }
 
@@ -53,7 +53,7 @@ export class CommunicationsService {
     });
   }
 
-  listThreads(user: AuthUser, schoolId?: number, branchId?: number) {
+  listThreads(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "messageThreads", { schoolId, branchId });
   }
 
@@ -66,7 +66,7 @@ export class CommunicationsService {
     });
   }
 
-  listMessages(user: AuthUser, schoolId?: number, branchId?: number) {
+  listMessages(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "messages", { schoolId, branchId });
   }
 
@@ -96,7 +96,7 @@ export class CommunicationsService {
     return message;
   }
 
-  listTemplates(user: AuthUser, schoolId?: number, branchId?: number) {
+  listTemplates(user: AuthUser, schoolId?: string, branchId?: string) {
     return this.records.list(user, "notificationTemplates", { schoolId, branchId });
   }
 

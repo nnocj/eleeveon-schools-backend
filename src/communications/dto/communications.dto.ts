@@ -1,16 +1,15 @@
-import { IsArray, IsIn, IsNumber, IsOptional, IsString } from "class-validator";
-import { Type } from "class-transformer";
+import { IsArray, IsIn, IsOptional, IsString } from "class-validator";
 
 export class CreateAnnouncementDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
   @IsString() title!: string;
   @IsString() body!: string;
   @IsIn(["all", "staff", "teachers", "parents", "students", "class", "organization", "custom"])
   audience!: string;
   @IsArray() channels!: string[];
-  @IsOptional() @Type(() => Number) @IsNumber() classId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() organizationId?: number;
+  @IsOptional() @IsString() classId?: string;
+  @IsOptional() @IsString() organizationId?: string;
   @IsOptional() @IsString() priority?: string;
   @IsOptional() @IsString() publishAt?: string;
   @IsOptional() @IsString() expiresAt?: string;
@@ -20,11 +19,11 @@ export class CreateAnnouncementDto {
 }
 
 export class CreateAnnouncementRecipientDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
-  @Type(() => Number) @IsNumber() announcementId!: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
+  @IsString() announcementId!: string;
   @IsString() recipientType!: string;
-  @IsOptional() @Type(() => Number) @IsNumber() recipientLocalId?: number;
+  @IsOptional() @IsString() recipientLocalId?: string;
   @IsOptional() @IsString() userId?: string;
   @IsOptional() @IsString() recipientName?: string;
   @IsOptional() @IsString() recipientPhone?: string;
@@ -34,21 +33,21 @@ export class CreateAnnouncementRecipientDto {
 }
 
 export class CreateMessageThreadDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
   @IsOptional() @IsString() title?: string;
   @IsString() threadType!: string;
-  @IsOptional() @Type(() => Number) @IsNumber() classId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() organizationId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() studentId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() teacherId?: number;
-  @IsOptional() @Type(() => Number) @IsNumber() parentId?: number;
+  @IsOptional() @IsString() classId?: string;
+  @IsOptional() @IsString() organizationId?: string;
+  @IsOptional() @IsString() studentId?: string;
+  @IsOptional() @IsString() teacherId?: string;
+  @IsOptional() @IsString() parentId?: string;
 }
 
 export class CreateMessageDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
-  @Type(() => Number) @IsNumber() threadId!: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
+  @IsString() threadId!: string;
   @IsString() body!: string;
   @IsOptional() @IsString() channel?: string;
   @IsOptional() @IsString() attachmentUrl?: string;
@@ -56,8 +55,8 @@ export class CreateMessageDto {
 }
 
 export class CreateNotificationTemplateDto {
-  @Type(() => Number) @IsNumber() schoolId!: number;
-  @Type(() => Number) @IsNumber() branchId!: number;
+  @IsString() schoolId!: string;
+  @IsString() branchId!: string;
   @IsString() name!: string;
   @IsString() purpose!: string;
   @IsString() channel!: string;
