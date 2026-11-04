@@ -63,6 +63,11 @@ export class PublicBillingController {
     return this.billingService.listPlans(false);
   }
 
+  @Get("plans/:id/quote")
+  quote(@Param("id") id: string, @Query("students") students: string) {
+    return this.billingService.publicStudentQuote(id, Number(students));
+  }
+
   /**
    * Paystack calls this route without an Eleeveon JWT.
    * Authenticity is verified in BillingService using x-paystack-signature.

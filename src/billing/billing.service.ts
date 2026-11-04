@@ -9,6 +9,7 @@ import * as crypto from "crypto";
 
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { parseStudentPricing, calculateStudentQuote } from "./student-pricing";
 
 import { AuthUser } from "../common/auth-user";
 
@@ -539,14 +540,32 @@ export class BillingService {
   // PLANS
   // =====================================================
 
+  private isPublicPlan(plan: { active: boolean; licenseModel: string; deploymentMode: string; metadata: unknown; availableAcquisitionModes: unknown }) {
+    const metadata = plan.metadata && typeof plan.metadata === "object" && !Array.isArray(plan.metadata) ? plan.metadata as Record<string, any> : {};
+    const modes = Array.isArray(plan.availableAcquisitionModes) ? plan.availableAcquisitionModes : [];
+    return plan.active && metadata.visibility !== "private" && metadata.publicVisible !== false
+      && plan.licenseModel !== "complimentary" && plan.deploymentMode !== "private_hosted"
+      && (modes.length === 0 || modes.some((mode: string) => ["self_service", "trial", "outright", "installments"].includes(mode)));
+  }
+
   async listPlans(includeInactive = false) {
-    return this.prisma.subscriptionPlan.findMany({
+    const plans = await this.prisma.subscriptionPlan.findMany({
       where: includeInactive ? {} : { active: true },
-      orderBy: [
-        { priceMonthly: "asc" },
-        { name: "asc" },
-      ],
+      orderBy: [{ priceMonthly: "asc" }, { name: "asc" }],
     });
+    return includeInactive ? plans : plans.filter(plan => this.isPublicPlan(plan));
+  }
+
+  async publicStudentQuote(planId: string, studentCount: number) {
+    const plan = await this.prisma.subscriptionPlan.findUnique({ where: { id: planId } });
+    if (!plan || !this.isPublicPlan(plan)) throw new NotFoundException("Public package not found.");
+    let pricing;
+    try { pricing = parseStudentPricing(plan.metadata); }
+    catch { throw new BadRequestException("Package pricing is not configured correctly."); }
+    if (pricing.mode === "fixed") throw new BadRequestException("This package uses fixed pricing.");
+    if (!Number.isSafeInteger(studentCount) || studentCount < 1 || studentCount > 1000000) throw new BadRequestException("Invalid student count.");
+    if (plan.maxStudents != null && studentCount > plan.maxStudents) throw new BadRequestException("Student count exceeds package limit.");
+    return { planId: plan.id, studentCount, amount: calculateStudentQuote(pricing, studentCount), currency: plan.currency, billingPeriod: pricing.billingPeriod, pricingMode: pricing.mode, indicative: true };
   }
 
   async createPlan(actor: AuthUser, dto: CreatePlanDto) {
@@ -557,6 +576,8 @@ export class BillingService {
       features,
       ...planFields
     } = dto;
+
+    try { parseStudentPricing(metadata); } catch (error) { throw new BadRequestException((error as Error).message); }
 
     const data: Prisma.SubscriptionPlanCreateInput = {
       ...planFields,
@@ -604,6 +625,8 @@ export class BillingService {
       features,
       ...planFields
     } = dto;
+
+    try { parseStudentPricing(metadata === undefined ? existing.metadata : metadata); } catch (error) { throw new BadRequestException((error as Error).message); }
 
     const data: Prisma.SubscriptionPlanUpdateInput = {
       ...planFields,
@@ -725,6 +748,17 @@ export class BillingService {
 
     if (!plan) {
       throw new NotFoundException("Active plan not found.");
+    }
+
+    // Do not charge fixed legacy amounts for a student-priced plan.
+    // A verified, immutable server quote must be attached to checkout first.
+    let pricing;
+    try { pricing = parseStudentPricing(plan.metadata); } catch { throw new BadRequestException("Invalid package pricing."); }
+    if (pricing.mode !== "fixed") {
+      throw new BadRequestException("Student-based checkout is not enabled yet. Request a quote; payment will be available after server-verified enrollment billing is implemented.");
+    }
+    if (plan.licenseModel !== "subscription" || plan.deploymentMode !== "eleeveon_cloud") {
+      throw new BadRequestException("This package requires its dedicated activation or purchase workflow.");
     }
 
     const now = new Date();
