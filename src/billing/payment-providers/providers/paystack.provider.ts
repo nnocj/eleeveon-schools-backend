@@ -185,7 +185,7 @@ export class PaystackProvider implements PaymentProvider {
 
     const json = await response.json();
 
-    if (!response.ok) {
+    if (!response.ok || json?.status !== true) {
       throw new BadRequestException(
         json?.message ||
           "Unable to verify payment."

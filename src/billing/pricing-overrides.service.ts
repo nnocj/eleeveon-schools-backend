@@ -1,5 +1,8 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
+import { ForbiddenException } from "@nestjs/common";
+import type { AuthUser } from "../common/auth-user";
+import { isDeveloper } from "../common/roles";
 import { EntitlementsService } from "../entitlements/entitlements.service";
 import type {
   UpsertPricingOverrideDto,
@@ -7,6 +10,12 @@ import type {
 
 @Injectable()
 export class PricingOverridesService {
+  private assertCommercialOperator(actor: AuthUser): void {
+    if (!actor || !isDeveloper(actor.role)) {
+      throw new ForbiddenException("Platform commercial administrator permission required.");
+    }
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly entitlements: EntitlementsService,
@@ -14,8 +23,9 @@ export class PricingOverridesService {
 
   async upsert(
     dto: UpsertPricingOverrideDto,
-    userId?: string,
+    actor: AuthUser,
   ) {
+    this.assertCommercialOperator(actor);
     const result =
       await this.prisma.accountPricingOverride.upsert({
         where: {
@@ -36,7 +46,7 @@ export class PricingOverridesService {
             dto.featureOverrides as any,
           limitOverrides:
             dto.limitOverrides as any,
-          updatedByUserId: userId,
+          updatedByUserId: actor.id,
         },
         create: {
           ...dto,
@@ -50,8 +60,8 @@ export class PricingOverridesService {
             dto.featureOverrides as any,
           limitOverrides:
             dto.limitOverrides as any,
-          createdByUserId: userId,
-          updatedByUserId: userId,
+          createdByUserId: actor.id,
+          updatedByUserId: actor.id,
           active: dto.active ?? true,
         },
       });
@@ -65,14 +75,15 @@ export class PricingOverridesService {
 
   async disable(
     id: string,
-    userId?: string,
+    actor: AuthUser,
   ) {
+    this.assertCommercialOperator(actor);
     const result =
       await this.prisma.accountPricingOverride.update({
         where: { id },
         data: {
           active: false,
-          updatedByUserId: userId,
+          updatedByUserId: actor.id,
         },
       });
 

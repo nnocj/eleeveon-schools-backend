@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 
+import { requireCommercialOperator } from "./commercial-operator";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import type { AuthRequest } from "../common/auth-user";
 
@@ -48,6 +49,7 @@ export class LicensesController {
     return this.validation.validate(dto);
   }
 
+  @UseGuards(JwtAuthGuard)
   @Post("deactivate")
   deactivate(
     @Body()
@@ -55,10 +57,12 @@ export class LicensesController {
       licenseId: string;
       deviceId: string;
     },
+    @Req() request: AuthRequest,
   ) {
     return this.activations.deactivate(
       dto.licenseId,
       dto.deviceId,
+      request.user,
     );
   }
 
@@ -68,9 +72,10 @@ export class LicensesController {
     @Body() dto: CreatePerpetualLicenseDto,
     @Req() request: AuthRequest,
   ) {
+    requireCommercialOperator(request.user);
     return this.licenses.issue(
       dto,
-      request.user.id,
+      request.user,
     );
   }
 
@@ -83,6 +88,7 @@ export class LicensesController {
     return this.licenses.getForAccount(
       accountId ??
         request.user.accountId,
+      request.user,
     );
   }
 
@@ -91,10 +97,13 @@ export class LicensesController {
   suspend(
     @Param("id") id: string,
     @Body() dto: { reason?: string },
+    @Req() request: AuthRequest,
   ) {
+    requireCommercialOperator(request.user);
     return this.licenses.suspend(
       id,
       dto.reason,
+      request.user,
     );
   }
 
@@ -103,10 +112,13 @@ export class LicensesController {
   revoke(
     @Param("id") id: string,
     @Body() dto: { reason?: string },
+    @Req() request: AuthRequest,
   ) {
+    requireCommercialOperator(request.user);
     return this.licenses.revoke(
       id,
       dto.reason,
+      request.user,
     );
   }
 
@@ -117,9 +129,10 @@ export class LicensesController {
     dto: CreateLicenseUpgradeOfferDto,
     @Req() request: AuthRequest,
   ) {
+    requireCommercialOperator(request.user);
     return this.upgrades.createOffer(
       dto,
-      request.user.id,
+      request.user,
     );
   }
 
@@ -128,10 +141,13 @@ export class LicensesController {
   markUpgradePaid(
     @Param("id") id: string,
     @Body() dto: { paymentId?: string },
+    @Req() request: AuthRequest,
   ) {
+    requireCommercialOperator(request.user);
     return this.upgrades.markPaid(
       id,
       dto.paymentId,
+      request.user,
     );
   }
 
@@ -141,15 +157,17 @@ export class LicensesController {
     @Param("id") id: string,
     @Req() request: AuthRequest,
   ) {
+    requireCommercialOperator(request.user);
     return this.upgrades.apply(
       id,
-      request.user.id,
+      request.user,
     );
   }
 
   @UseGuards(JwtAuthGuard)
   @Post("upgrade-offers/:id/cancel")
-  cancelUpgrade(@Param("id") id: string) {
-    return this.upgrades.cancel(id);
+  cancelUpgrade(@Param("id") id: string, @Req() request: AuthRequest) {
+    requireCommercialOperator(request.user);
+    return this.upgrades.cancel(id, request.user);
   }
 }

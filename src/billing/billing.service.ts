@@ -115,30 +115,46 @@ export class BillingService {
     ).trim();
   }
 
-  private verifyPaystackSignature(signature: string, body: any) {
-    if (!signature) {
-      throw new BadRequestException(
-        "Missing Paystack webhook signature."
-      );
+  private verifyPaystackSignature(signature: string, rawBody?: Buffer) {
+    if (!signature || !Buffer.isBuffer(rawBody)) {
+      throw new BadRequestException("Missing signature or raw Paystack webhook payload.");
     }
+    const expected = crypto.createHmac("sha512", this.getPaystackSecretKey())
+      .update(rawBody).digest();
+    if (!/^[0-9a-f]{128}$/i.test(signature)) {
+      throw new BadRequestException("Invalid Paystack webhook signature.");
+    }
+    const received = Buffer.from(signature, "hex");
+    if (received.length !== expected.length || !crypto.timingSafeEqual(expected, received)) {
+      throw new BadRequestException("Invalid Paystack webhook signature.");
+    }
+  }
 
-    const secret = this.getPaystackSecretKey();
-
-    const hash = crypto
-      .createHmac("sha512", secret)
-      .update(JSON.stringify(body))
-      .digest("hex");
-
-    const left = Buffer.from(hash, "utf8");
-    const right = Buffer.from(signature, "utf8");
-
+  // Paystack sends amounts in the smallest currency unit (pesewas for GHS).
+  // Never accept a provider-reported success without matching the local record.
+  private validatePaystackSettlement(payment: {
+    id: string; provider: string | null; providerReference: string | null;
+    amount: number; currency: string; accountId: string;
+    invoiceId: string | null; subscriptionId: string | null;
+  }, result: any, requestedReference: string) {
+    const data = result?.raw?.data;
+    const amount = Number(data?.amount);
+    const currency = String(data?.currency || "").toUpperCase();
+    const expectedAmount = Math.round(Number(payment.amount) * 100);
     if (
-      left.length !== right.length ||
-      !crypto.timingSafeEqual(left, right)
+      payment.provider !== "paystack" ||
+      payment.providerReference !== requestedReference ||
+      result?.status !== "paid" || result?.success !== true ||
+      result?.raw?.status !== true || data?.status !== "success" ||
+      data?.reference !== requestedReference ||
+      !Number.isSafeInteger(amount) || amount !== expectedAmount ||
+      currency !== String(payment.currency).toUpperCase() ||
+      (data?.metadata?.paymentId != null && data.metadata.paymentId !== payment.id) ||
+      (data?.metadata?.accountId != null && data.metadata.accountId !== payment.accountId) ||
+      (data?.metadata?.invoiceId != null && data.metadata.invoiceId !== payment.invoiceId) ||
+      (data?.metadata?.subscriptionId != null && data.metadata.subscriptionId !== payment.subscriptionId)
     ) {
-      throw new BadRequestException(
-        "Invalid Paystack webhook signature."
-      );
+      throw new BadRequestException("Paystack verification does not match the recorded payment.");
     }
   }
 
@@ -428,7 +444,8 @@ export class BillingService {
     }
 
     if (existing.status === "paid") {
-      return this.activateSubscriptionFromPayment(existing.id);
+      // A duplicate callback must not extend an already activated billing period.
+      return this.prisma.appPayment.findUnique({ where: { id: existing.id } });
     }
 
     const paidAt = data?.paidAt
@@ -467,6 +484,8 @@ export class BillingService {
     if (!existing) {
       throw new NotFoundException("Payment not found.");
     }
+
+    if (existing.status === "paid") return existing;
 
     return this.prisma.appPayment.update({
       where: { id: paymentId },
@@ -1077,11 +1096,11 @@ export class BillingService {
       );
     }
 
-    const result =
-      await this.paymentProviderService.verifyPayment(
-        provider,
-        reference
-      );
+    if (provider !== "paystack") {
+      throw new BadRequestException("Manual payment verification is an operator-only workflow.");
+    }
+
+    const result = await this.paymentProviderService.verifyPayment("paystack", reference);
 
     const payment = await this.prisma.appPayment.findFirst({
       where: { providerReference: reference },
@@ -1094,6 +1113,16 @@ export class BillingService {
     assertSameAccountOrDeveloper(actor, payment.accountId);
 
     if (result.status === "paid") {
+      this.validatePaystackSettlement(payment, result, reference);
+      if (payment.invoiceId) {
+        const invoice = await this.prisma.invoice.findUnique({ where: { id: payment.invoiceId } });
+        if (!invoice || invoice.accountId !== payment.accountId ||
+          invoice.currency.toUpperCase() !== payment.currency.toUpperCase() ||
+          Number(invoice.total) !== Number(payment.amount) ||
+          (payment.subscriptionId && invoice.subscriptionId !== payment.subscriptionId)) {
+          throw new BadRequestException("Invoice and payment do not match.");
+        }
+      }
       return this.markPaymentPaid(payment.id, {
         providerReference:
           result.providerReference || reference,
@@ -1122,71 +1151,44 @@ export class BillingService {
   // PAYSTACK WEBHOOK
   // =====================================================
 
-  async handlePaystackWebhook(signature: string, body: any) {
-    this.verifyPaystackSignature(signature, body);
-
+  async handlePaystackWebhook(signature: string, body: any, rawBody?: Buffer) {
+    this.verifyPaystackSignature(signature, rawBody);
     const event = body?.event;
-    const data = body?.data;
-    const reference = data?.reference;
-
-    if (!event || !reference) {
-      return {
-        ok: true,
-        ignored: true,
-        reason: "Missing event or reference.",
-      };
+    const reference = body?.data?.reference;
+    if (!event || typeof reference !== "string" || !reference) {
+      return { ok: true, ignored: true, reason: "Missing event or reference." };
     }
-
+    if (event !== "charge.success") {
+      // Disputes, chargebacks and failed attempts require their own reviewed
+      // payment state machine. Never automatically revoke a prior paid result.
+      return { ok: true, ignored: true, event };
+    }
     const payment = await this.prisma.appPayment.findFirst({
-      where: { providerReference: reference },
+      where: { provider: "paystack", providerReference: reference },
     });
-
     if (!payment) {
-      return {
-        ok: true,
-        ignored: true,
-        reason: "Payment record not found locally.",
-      };
+      return { ok: true, ignored: true, reason: "Payment record not found locally." };
     }
-
-    if (event === "charge.success") {
-      await this.markPaymentPaid(payment.id, {
-        providerReference: reference,
-        receiptNumber:
-          data?.receipt_number || payment.receiptNumber || undefined,
-        paidAt: data?.paid_at || new Date(),
-        note: payment.note || undefined,
-        raw: data,
-      });
-
-      return {
-        ok: true,
-        status: "paid",
-      };
+    // Independently obtain transaction status, amount and currency from Paystack.
+    // The signed event alone is not sufficient to settle an invoice.
+    const verified = await this.paymentProviderService.verifyPayment("paystack", reference);
+    this.validatePaystackSettlement(payment, verified, reference);
+    if (payment.invoiceId) {
+      const invoice = await this.prisma.invoice.findUnique({ where: { id: payment.invoiceId } });
+      if (!invoice || invoice.accountId !== payment.accountId ||
+        invoice.currency.toUpperCase() !== payment.currency.toUpperCase() ||
+        Number(invoice.total) !== Number(payment.amount) ||
+        (payment.subscriptionId && invoice.subscriptionId !== payment.subscriptionId)) {
+        throw new BadRequestException("Invoice and payment do not match.");
+      }
     }
-
-    if (
-      event === "charge.failed" ||
-      event === "charge.dispute.create"
-    ) {
-      await this.markPaymentFailed(payment.id, {
-        providerReference: reference,
-        note:
-          data?.gateway_response ||
-          "Paystack reported payment failure.",
-      });
-
-      return {
-        ok: true,
-        status: "failed",
-      };
-    }
-
-    return {
-      ok: true,
-      ignored: true,
-      event,
-    };
+    await this.markPaymentPaid(payment.id, {
+      providerReference: reference,
+      receiptNumber: verified.receiptNumber || payment.receiptNumber || undefined,
+      paidAt: verified.paidAt || new Date(),
+      raw: verified.raw,
+    });
+    return { ok: true, status: "paid" };
   }
 
   // =====================================================
@@ -1402,6 +1404,7 @@ export class BillingService {
       paidAt?: string;
     }
   ) {
+    this.developerOnly(actor);
     const existing = await this.prisma.appPayment.findUnique({
       where: { id },
     });
@@ -1429,6 +1432,7 @@ export class BillingService {
       providerReference?: string;
     }
   ) {
+    this.developerOnly(actor);
     const existing = await this.prisma.appPayment.findUnique({
       where: { id },
     });
@@ -1451,6 +1455,7 @@ export class BillingService {
     id: string,
     dto: { note?: string }
   ) {
+    this.developerOnly(actor);
     const existing = await this.prisma.appPayment.findUnique({
       where: { id },
     });
@@ -1460,6 +1465,10 @@ export class BillingService {
     }
 
     assertSameAccountOrDeveloper(actor, existing.accountId);
+
+    if (existing.status === "paid") {
+      throw new BadRequestException("A paid payment cannot be cancelled using this endpoint.");
+    }
 
     return this.prisma.appPayment.update({
       where: { id },

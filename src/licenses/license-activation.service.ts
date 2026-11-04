@@ -5,6 +5,9 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
+import type { AuthUser } from "../common/auth-user";
+import { requireCommercialOperator } from "./commercial-operator";
+import { ForbiddenException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 
 import { LicenseCryptoService } from "./license-crypto.service";
@@ -191,6 +194,7 @@ export class LicenseActivationService {
   async deactivate(
     licenseId: string,
     deviceId: string,
+    actor: AuthUser,
   ) {
     const activation =
       await this.prisma.licenseActivation.findUnique({
@@ -207,6 +211,7 @@ export class LicenseActivationService {
         "Licence activation not found.",
       );
     }
+    if (activation.accountId !== actor.accountId) requireCommercialOperator(actor);
 
     const now = new Date();
 

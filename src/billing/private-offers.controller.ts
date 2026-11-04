@@ -7,6 +7,8 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { RolesGuard } from "../common/roles.guard";
+import { Roles } from "../common/roles.decorator";
 import type { AuthRequest } from "../common/auth-user";
 import {
   AssignPrivateOfferDto,
@@ -15,7 +17,8 @@ import {
 import { PrivateOffersService } from "./private-offers.service";
 
 @Controller("billing/private-offers")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles("developer", "platform_team")
 export class PrivateOffersController {
   constructor(
     private readonly offers: PrivateOffersService,
@@ -28,7 +31,7 @@ export class PrivateOffersController {
   ) {
     return this.offers.create(
       dto,
-      request.user.id,
+      request.user,
     );
   }
 
@@ -39,7 +42,7 @@ export class PrivateOffersController {
   ) {
     return this.offers.assign(
       dto,
-      request.user.id,
+      request.user,
     );
   }
 
@@ -50,7 +53,7 @@ export class PrivateOffersController {
   ) {
     return this.offers.revoke(
       id,
-      request.user.id,
+      request.user,
     );
   }
 }

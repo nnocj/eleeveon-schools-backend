@@ -6,6 +6,9 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
+import type { AuthUser } from "../common/auth-user";
+import { requireCommercialOperator } from "./commercial-operator";
+import { ForbiddenException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { EntitlementsService } from "../entitlements/entitlements.service";
 
@@ -24,8 +27,10 @@ export class PerpetualLicenseService {
 
   async issue(
     dto: CreatePerpetualLicenseDto,
-    createdByUserId?: string,
+    actor: AuthUser,
   ) {
+    requireCommercialOperator(actor);
+    const createdByUserId = actor.id;
     const plan =
       await this.prisma.subscriptionPlan.findUnique({
         where: { id: dto.planId },
@@ -200,7 +205,8 @@ export class PerpetualLicenseService {
     };
   }
 
-  async getForAccount(accountId: string) {
+  async getForAccount(accountId: string, actor: AuthUser) {
+    if (actor.accountId !== accountId) requireCommercialOperator(actor);
     return this.prisma.perpetualLicense.findMany({
       where: { accountId },
       include: {
@@ -218,8 +224,10 @@ export class PerpetualLicenseService {
 
   async suspend(
     licenseId: string,
-    reason?: string,
+    reason: string | undefined,
+    actor: AuthUser,
   ) {
+    requireCommercialOperator(actor);
     const license =
       await this.prisma.perpetualLicense.update({
         where: { id: licenseId },
@@ -241,8 +249,10 @@ export class PerpetualLicenseService {
 
   async revoke(
     licenseId: string,
-    reason?: string,
+    reason: string | undefined,
+    actor: AuthUser,
   ) {
+    requireCommercialOperator(actor);
     const license =
       await this.prisma.$transaction(
         async (tx) => {

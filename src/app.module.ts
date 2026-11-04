@@ -12,6 +12,7 @@ import { EntitlementsModule } from "./entitlements";
 
 // Business and finance
 import { BillingModule } from "./billing/billing.module";
+import { LicensesModule } from "./licenses/licenses.module";
 import { FinanceModule } from "./finance/finance.module";
 import { PaymentGatewayModule } from "./payment-gateway/payment-gateway.module";
 import { PayrollModule } from "./payroll/payroll.module";
@@ -43,6 +44,7 @@ import { SupportModule } from "./support/support.module";
 
     // Business and finance
     BillingModule,
+    LicensesModule,
     FinanceModule,
     PaymentGatewayModule,
     PayrollModule,

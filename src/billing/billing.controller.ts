@@ -14,6 +14,7 @@ import {
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { RolesGuard } from "../common/roles.guard";
+import { Roles } from "../common/roles.decorator";
 
 import { BillingService } from "./billing.service";
 
@@ -78,10 +79,12 @@ export class PublicBillingController {
     signature: string,
     @Body()
     body: any,
+    @Req() req: any,
   ) {
     return this.billingService.handlePaystackWebhook(
       signature,
       body,
+      req.rawBody,
     );
   }
 }
@@ -311,6 +314,7 @@ export class BillingController {
   // CONFIRM
   // =====================================================
 
+  @Roles("developer", "platform_team")
   @Post("payments/:id/confirm")
   confirmPayment(
     @Req() req: any,
@@ -334,6 +338,7 @@ export class BillingController {
   // FAIL
   // =====================================================
 
+  @Roles("developer", "platform_team")
   @Post("payments/:id/fail")
   failPayment(
     @Req() req: any,
@@ -355,6 +360,7 @@ export class BillingController {
   // CANCEL
   // =====================================================
 
+  @Roles("developer", "platform_team")
   @Post("payments/:id/cancel")
   cancelPayment(
     @Req() req: any,

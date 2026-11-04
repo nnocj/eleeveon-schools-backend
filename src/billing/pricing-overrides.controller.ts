@@ -7,12 +7,15 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { RolesGuard } from "../common/roles.guard";
+import { Roles } from "../common/roles.decorator";
 import type { AuthRequest } from "../common/auth-user";
 import { UpsertPricingOverrideDto } from "./dto/pricing-override.dto";
 import { PricingOverridesService } from "./pricing-overrides.service";
 
 @Controller("billing/pricing-overrides")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles("developer", "platform_team")
 export class PricingOverridesController {
   constructor(
     private readonly overrides: PricingOverridesService,
@@ -25,7 +28,7 @@ export class PricingOverridesController {
   ) {
     return this.overrides.upsert(
       dto,
-      request.user.id,
+      request.user,
     );
   }
 
@@ -36,7 +39,7 @@ export class PricingOverridesController {
   ) {
     return this.overrides.disable(
       id,
-      request.user.id,
+      request.user,
     );
   }
 }

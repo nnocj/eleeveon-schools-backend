@@ -5,6 +5,8 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
+import type { AuthUser } from "../common/auth-user";
+import { requireCommercialOperator } from "./commercial-operator";
 import { PrismaService } from "../prisma/prisma.service";
 import { EntitlementsService } from "../entitlements/entitlements.service";
 
@@ -21,8 +23,10 @@ export class LicenseUpgradeService {
 
   async createOffer(
     dto: CreateLicenseUpgradeOfferDto,
-    requestedByUserId?: string,
+    actor: AuthUser,
   ) {
+    requireCommercialOperator(actor);
+    const requestedByUserId = actor.id;
     const license =
       await this.prisma.perpetualLicense.findFirst({
         where: {
@@ -107,8 +111,21 @@ export class LicenseUpgradeService {
 
   async markPaid(
     offerId: string,
-    paymentId?: string,
+    paymentId: string | undefined,
+    actor: AuthUser,
   ) {
+    requireCommercialOperator(actor);
+    const offer = await this.prisma.licenseUpgradeOffer.findUnique({ where: { id: offerId } });
+    if (!offer) throw new NotFoundException("Licence upgrade offer not found.");
+    if (offer.status === "applied") throw new BadRequestException("Upgrade already applied.");
+    if (offer.amountDue > 0) {
+      if (!paymentId) throw new BadRequestException("A confirmed payment is required.");
+      const payment = await this.prisma.appPayment.findFirst({ where: {
+        id: paymentId, accountId: offer.accountId, status: "paid",
+        currency: offer.currency, amount: offer.amountDue,
+      }});
+      if (!payment) throw new BadRequestException("Matching paid payment not found.");
+    }
     return this.prisma.licenseUpgradeOffer.update({
       where: { id: offerId },
       data: {
@@ -121,8 +138,10 @@ export class LicenseUpgradeService {
 
   async apply(
     offerId: string,
-    appliedByUserId?: string,
+    actor: AuthUser,
   ) {
+    requireCommercialOperator(actor);
+    const appliedByUserId = actor.id;
     const offer =
       await this.prisma.licenseUpgradeOffer.findUnique({
         where: { id: offerId },
@@ -286,7 +305,11 @@ export class LicenseUpgradeService {
     return updated;
   }
 
-  async cancel(offerId: string) {
+  async cancel(offerId: string, actor: AuthUser) {
+    requireCommercialOperator(actor);
+    const existing = await this.prisma.licenseUpgradeOffer.findUnique({where:{id:offerId}});
+    if (!existing) throw new NotFoundException("Upgrade offer not found.");
+    if (["paid","applied"].includes(existing.status)) throw new BadRequestException("Paid or applied offers cannot be cancelled.");
     return this.prisma.licenseUpgradeOffer.update({
       where: { id: offerId },
       data: {

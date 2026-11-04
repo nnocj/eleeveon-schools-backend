@@ -4,6 +4,9 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
+import { ForbiddenException } from "@nestjs/common";
+import type { AuthUser } from "../common/auth-user";
+import { isDeveloper } from "../common/roles";
 import { EntitlementsService } from "../entitlements/entitlements.service";
 import type {
   AssignPrivateOfferDto,
@@ -12,6 +15,12 @@ import type {
 
 @Injectable()
 export class PrivateOffersService {
+  private assertCommercialOperator(actor: AuthUser): void {
+    if (!actor || !isDeveloper(actor.role)) {
+      throw new ForbiddenException("Platform commercial administrator permission required.");
+    }
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly entitlements: EntitlementsService,
@@ -19,8 +28,9 @@ export class PrivateOffersService {
 
   create(
     dto: CreatePrivateOfferDto,
-    createdByUserId?: string,
+    actor: AuthUser,
   ) {
+    this.assertCommercialOperator(actor);
     return this.prisma.privateOffer.create({
       data: {
         ...dto,
@@ -30,7 +40,7 @@ export class PrivateOffersService {
         validUntil: dto.validUntil
           ? new Date(dto.validUntil)
           : undefined,
-        createdByUserId,
+        createdByUserId: actor.id,
         active: true,
         featureOverrides:
           dto.featureOverrides as any,
@@ -42,8 +52,9 @@ export class PrivateOffersService {
 
   async assign(
     dto: AssignPrivateOfferDto,
-    assignedByUserId?: string,
+    actor: AuthUser,
   ) {
+    this.assertCommercialOperator(actor);
     const offer =
       await this.prisma.privateOffer.findUnique({
         where: { id: dto.offerId },
@@ -85,7 +96,7 @@ export class PrivateOffersService {
                   ? new Date(dto.validUntil)
                   : undefined,
                 reason: dto.reason,
-                assignedByUserId,
+                assignedByUserId: actor.id,
                 revokedAt: null,
               },
               create: {
@@ -99,7 +110,7 @@ export class PrivateOffersService {
                   ? new Date(dto.validUntil)
                   : undefined,
                 reason: dto.reason,
-                assignedByUserId,
+                assignedByUserId: actor.id,
               },
             });
 
@@ -125,15 +136,16 @@ export class PrivateOffersService {
 
   async revoke(
     assignmentId: string,
-    revokedByUserId?: string,
+    actor: AuthUser,
   ) {
+    this.assertCommercialOperator(actor);
     const assignment =
       await this.prisma.privateOfferAssignment.update({
         where: { id: assignmentId },
         data: {
           status: "revoked",
           revokedAt: new Date(),
-          revokedByUserId,
+          revokedByUserId: actor.id,
         },
       });
 

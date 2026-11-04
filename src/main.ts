@@ -15,7 +15,7 @@ import { AppModule } from "./app.module";
  *   normal JSON SyncRecord payloads.
  */
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
 
   /**
    * Moderate request-body ceiling.
@@ -26,6 +26,7 @@ async function bootstrap() {
   app.use(
     json({
       limit: "2mb",
+      verify: (req, _res, buf) => { (req as any).rawBody = Buffer.from(buf); },
     }),
   );
 
@@ -33,6 +34,7 @@ async function bootstrap() {
     urlencoded({
       extended: true,
       limit: "2mb",
+      verify: (req, _res, buf) => { (req as any).rawBody = Buffer.from(buf); },
     }),
   );
 
