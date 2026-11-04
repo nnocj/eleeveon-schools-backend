@@ -158,6 +158,7 @@ export class AuthService {
             await tx.subscriptionPlan.findUnique({
               where: {
                 code: "trial",
+                active: true,
               },
             });
 
@@ -165,15 +166,20 @@ export class AuthService {
             const now =
               new Date();
 
-            const trialEndsAt =
-              new Date(
-                now.getTime() +
-                  14 *
-                    24 *
-                    60 *
-                    60 *
-                    1000,
-              );
+            // The plan catalogue controls new account trial duration.
+            // Existing subscriptions and protected pilots are never modified here.
+            const trialMetadata = trialPlan.metadata;
+            const configuredDays = trialMetadata &&
+              typeof trialMetadata === "object" &&
+              !Array.isArray(trialMetadata) &&
+              "trialDays" in trialMetadata
+              ? Number(trialMetadata.trialDays) : 14;
+            const trialDays = Number.isInteger(configuredDays) &&
+              configuredDays >= 1 && configuredDays <= 365
+              ? configuredDays : 14;
+            const trialEndsAt = new Date(
+              now.getTime() + trialDays * 24 * 60 * 60 * 1000,
+            );
 
             await tx.accountSubscription.create({
               data: {

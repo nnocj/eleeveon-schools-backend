@@ -39,8 +39,12 @@ const LICENSE_MODELS = [
 ] as const;
 
 const DEPLOYMENT_MODES = [
-  "connected",
-  "offline",
+  "eleeveon_cloud",
+  "independent_essentials",
+  "independent_multi_device",
+  "private_hosted",
+  "connected", // legacy
+  "offline", // legacy
 ] as const;
 
 const SYNC_POLICIES = [
@@ -214,6 +218,11 @@ export class CreatePlanDto {
   @IsArray()
   @IsString({ each: true })
   features?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsIn(["trial", "self_service", "private_offer", "complimentary", "outright", "installments"], { each: true })
+  availableAcquisitionModes?: string[];
 
   @IsOptional()
   @IsObject()
