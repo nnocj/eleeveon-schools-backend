@@ -6,6 +6,7 @@ import { parseStudentPricing, calculateStudentQuote } from "./student-pricing";
 import { PrismaService } from "../prisma/prisma.service";
 import { SubscriptionCalculatorService } from "./subscription-calculator.service";
 import type { BillingCycle } from "./types/subscription.types";
+import { BadRequestException } from "@nestjs/common";
 
 @Injectable()
 export class PricingResolutionService {
