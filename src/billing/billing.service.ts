@@ -433,41 +433,115 @@ export class BillingService {
       paidAt?: string | Date | null;
       note?: string;
       raw?: any;
-    }
+    },
   ) {
+    // Serialize fulfillment for this account in PostgreSQL. Both browser
+    // verification and a webhook may arrive simultaneously.
     const existing = await this.prisma.appPayment.findUnique({
       where: { id: paymentId },
     });
+    if (!existing) throw new NotFoundException("Payment not found.");
 
-    if (!existing) {
-      throw new NotFoundException("Payment not found.");
+    const paidAt = data?.paidAt ? new Date(data.paidAt) : new Date();
+    if (Number.isNaN(paidAt.getTime())) {
+      throw new BadRequestException("Invalid payment settlement timestamp.");
     }
 
-    if (existing.status === "paid") {
-      // A duplicate callback must not extend an already activated billing period.
-      return this.prisma.appPayment.findUnique({ where: { id: existing.id } });
-    }
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Advisory transaction lock is released on commit/rollback.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${existing.accountId}))`;
+      const payment = await tx.appPayment.findUnique({
+        where: { id: paymentId },
+        include: { invoice: true, subscription: true, changeOrder: true },
+      });
+      if (!payment || payment.accountId !== existing.accountId) {
+        throw new NotFoundException("Payment not found for account.");
+      }
+      if (payment.status === "paid") {
+        return { paymentId: payment.id, changeOrderId: payment.changeOrder?.id || null };
+      }
+      if (payment.invoiceId) {
+        if (!payment.invoice ||
+            payment.invoice.accountId !== payment.accountId ||
+            payment.invoice.currency.toUpperCase() !== payment.currency.toUpperCase() ||
+            Number(payment.invoice.total) !== Number(payment.amount) ||
+            (payment.subscriptionId && payment.invoice.subscriptionId !== payment.subscriptionId)) {
+          throw new BadRequestException("Payment and invoice records do not match.");
+        }
+      }
+      if (payment.subscription && payment.subscription.accountId !== payment.accountId) {
+        throw new BadRequestException("Subscription belongs to another account.");
+      }
 
-    const paidAt = data?.paidAt
-      ? new Date(data.paidAt)
-      : new Date();
-
-    const updated = await this.prisma.appPayment.update({
-      where: { id: paymentId },
-      data: {
-        status: "paid",
-        providerReference:
-          data?.providerReference || existing.providerReference,
-        receiptNumber:
-          data?.receiptNumber ||
-          existing.receiptNumber ||
-          `RCT-${Date.now()}`,
-        paidAt,
-        note: data?.note || existing.note,
-      },
+      const updated = await tx.appPayment.update({
+        where: { id: paymentId },
+        data: {
+          status: "paid",
+          providerReference: data?.providerReference || payment.providerReference,
+          receiptNumber: data?.receiptNumber || payment.receiptNumber || `RCT-${payment.id}`,
+          paidAt,
+          note: data?.note || payment.note,
+        },
+      });
+      if (payment.invoiceId) {
+        await tx.invoice.update({
+          where: { id: payment.invoiceId },
+          data: {
+            status: "paid",
+            paidAt,
+            amountPaid: payment.amount,
+            balance: 0,
+          },
+        });
+      }
+      if (payment.changeOrder) {
+        // Change-order application has its own serialized, idempotent
+        // transaction; retry it even when payment was previously marked paid.
+        return { paymentId: payment.id, changeOrderId: payment.changeOrder.id };
+      }
+      if (payment.subscriptionId && payment.invoiceId) {
+        const cycle = this.normalizeBillingCycle(payment.subscription?.billingCycle);
+        const period = this.calculateSubscriptionPeriod(cycle, paidAt);
+        await tx.accountSubscription.update({
+          where: { id: payment.subscriptionId },
+          data: {
+            status: "active",
+            billingCycle: cycle,
+            currentPeriodStart: period.currentPeriodStart,
+            currentPeriodEnd: period.currentPeriodEnd,
+            nextBillingDate: period.nextBillingDate,
+            cancelledAt: null,
+            cancelReason: null,
+          },
+        });
+        await tx.billingEvent.create({
+          data: {
+            accountId: payment.accountId,
+            type: "payment_received",
+            message: `Payment received: ${payment.currency} ${payment.amount}`,
+            metadata: {
+              paymentId: payment.id,
+              invoiceId: payment.invoiceId,
+              subscriptionId: payment.subscriptionId,
+              provider: payment.provider,
+              providerReference: updated.providerReference,
+              billingCycle: cycle,
+            },
+          },
+        });
+      }
+      return { paymentId: payment.id, changeOrderId: null };
     });
 
-    return this.activateSubscriptionFromPayment(updated.id);
+    // If a previous process committed the payment but crashed before applying
+    // its change order, another verified callback safely resumes the work.
+    if (result.changeOrderId) {
+      return this.subscriptionChanges.applyPaidChangeOrder(result.changeOrderId);
+    }
+    return this.prisma.appPayment.findUnique({
+      where: { id: result.paymentId },
+      include: { invoice: true, subscription: { include: { plan: true } } },
+    });
   }
 
   private async markPaymentFailed(
@@ -778,6 +852,18 @@ export class BillingService {
     }
     if (plan.licenseModel !== "subscription" || plan.deploymentMode !== "eleeveon_cloud") {
       throw new BadRequestException("This package requires its dedicated activation or purchase workflow.");
+    }
+
+    // Legacy subscribeToPlan changes the current plan before payment succeeds.
+    // Existing schools must use a quoted change order, which preserves access
+    // until verified settlement. Do not allow the legacy path to downgrade a pilot.
+    const existingSubscription = await this.prisma.accountSubscription.findUnique({
+      where: { accountId: actor.accountId },
+    });
+    if (existingSubscription) {
+      throw new BadRequestException(
+        "This account already has a package. Use the subscription quote/change-order checkout to change it without interrupting existing access.",
+      );
     }
 
     const now = new Date();

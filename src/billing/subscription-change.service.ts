@@ -380,6 +380,24 @@ export class SubscriptionChangeService {
 
     const applied = await this.prisma.$transaction(
       async (tx) => {
+        // All applications for one school are serialized, even if separate
+        // webhooks / workers attempt to fulfill the same order concurrently.
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${order.accountId}))`;
+        const fresh = await tx.subscriptionChangeOrder.findUnique({
+          where: { id: order.id },
+        });
+        if (!fresh) throw new NotFoundException("Subscription change order not found.");
+        if (fresh.status === "applied") return fresh;
+        if (!["paid", "scheduled"].includes(fresh.status)) {
+          throw new BadRequestException(`Cannot apply change order from ${fresh.status}.`);
+        }
+        const current = await tx.accountSubscription.findUnique({
+          where: { accountId: order.accountId },
+        });
+        // Prevent an old quotation overriding a newer package change.
+        if (fresh.fromPlanId && current?.planId !== fresh.fromPlanId) {
+          throw new BadRequestException("This quotation is stale; request a new quotation.");
+        }
         const subscription =
           await tx.accountSubscription.upsert({
             where: { accountId: order.accountId },
