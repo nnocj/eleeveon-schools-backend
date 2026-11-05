@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { acquisitionOf, chooseCommercialBase, deploymentModeOf, syncPolicyOf, updatePolicyOf, statusAt } from "../commercial/deployment-policy";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { EntitlementPolicyService } from "./entitlement-policy.service";
@@ -36,7 +37,7 @@ export class EntitlementResolverService {
       accountId,
       entitlementId: entitlement.id,
       source: this.asSource(entitlement.source),
-      status: this.asStatus(entitlement.status),
+      status: statusAt({status: entitlement.status, validUntil: entitlement.validUntil, graceEndsAt: entitlement.graceEndsAt}),
       planId: entitlement.planId,
       subscriptionId: entitlement.subscriptionId,
       perpetualLicenseId:
@@ -189,6 +190,9 @@ export class EntitlementResolverService {
     let validUntil = base.validUntil;
     const sourceDetails: JsonObject = {
       baseSource: base.source,
+      acquisitionModel: base.licenseModel,
+      sourcePlanId: base.planId,
+      selectedPerpetualLicenseId: base.perpetualLicenseId,
       privateOfferAssignmentId:
         privateAssignment?.id,
       pricingOverrideId: pricingOverride?.id,
@@ -334,34 +338,28 @@ export class EntitlementResolverService {
     perpetualLicense: any,
     now: Date,
   ): EffectiveAccessSnapshot | null {
-    if (
-      subscription &&
-      [
-        "trial",
-        "pending",
-        "active",
-        "grace",
-        "past_due",
-      ].includes(subscription.status)
-    ) {
+    const subscriptionValidUntil = subscription?.status === "trial"
+      ? (subscription.trialEndsAt ?? subscription.currentPeriodEnd ?? null)
+      : (subscription?.currentPeriodEnd ?? null);
+    const selected = chooseCommercialBase({
+      subscriptionStatus: subscription?.status,
+      subscriptionValidUntil,
+      subscriptionGraceEndsAt: subscription?.graceEndsAt,
+      hasActivePerpetual: Boolean(perpetualLicense),
+      at: now,
+    });
+    if (subscription && selected === "subscription") {
       const plan = subscription.plan;
 
+      const acquisition = acquisitionOf(plan.licenseModel, subscription.status);
       return {
         accountId: subscription.accountId,
-        source:
-          subscription.status === "trial"
-            ? "trial"
-            : "subscription",
-        status: this.asStatus(
-          subscription.status,
-        ),
+        source: acquisition === "trial" ? "trial" : "subscription",
+        status: statusAt({status: subscription.status, validUntil: subscriptionValidUntil, graceEndsAt: subscription.graceEndsAt}, now),
         planId: plan.id,
         subscriptionId: subscription.id,
         perpetualLicenseId: null,
-        licenseModel:
-          subscription.status === "trial"
-            ? "trial"
-            : "subscription",
+        licenseModel: acquisition === "complimentary" ? "complimentary" : acquisition === "trial" ? "trial" : "subscription",
         deploymentMode:
           this.asDeploymentMode(
             subscription.deploymentMode ??
@@ -383,10 +381,7 @@ export class EntitlementResolverService {
           subscription.currentPeriodStart ??
           subscription.trialStartedAt ??
           null,
-        validUntil:
-          subscription.currentPeriodEnd ??
-          subscription.trialEndsAt ??
-          null,
+        validUntil: subscriptionValidUntil,
         graceEndsAt:
           subscription.graceEndsAt ?? null,
         features: this.planFeatures(plan),
@@ -425,8 +420,8 @@ export class EntitlementResolverService {
           perpetualLicense.activatedAt ??
           perpetualLicense.purchasedAt ??
           perpetualLicense.createdAt,
-        validUntil:
-          versionEntitlement?.expiresAt ?? null,
+        // Version update rights can expire; ownership of an outright licence does not.
+        validUntil: null,
         graceEndsAt:
           perpetualLicense.nextValidationAt
             ? new Date(
@@ -636,33 +631,19 @@ export class EntitlementResolverService {
   private asDeploymentMode(
     value: string,
   ): DeploymentMode {
-    return value === "offline"
-      ? "offline"
-      : "connected";
+    return deploymentModeOf(value);
   }
 
   private asSyncPolicy(
     value: string,
   ): SyncPolicy {
-    return [
-      "full",
-      "platform_only",
-      "disabled",
-    ].includes(value)
-      ? (value as SyncPolicy)
-      : "disabled";
+    return syncPolicyOf(value);
   }
 
   private asUpdatePolicy(
     value: string,
   ): UpdatePolicy {
-    return [
-      "continuous",
-      "security_only",
-      "version_locked",
-    ].includes(value)
-      ? (value as UpdatePolicy)
-      : "version_locked";
+    return updatePolicyOf(value);
   }
 
   private asStatus(

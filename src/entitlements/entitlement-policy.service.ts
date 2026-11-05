@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { statusAt } from "../commercial/deployment-policy";
 import {
   DEFAULT_FEATURES,
   RESOURCE_TO_USAGE_FIELD,
@@ -58,14 +59,13 @@ export class EntitlementPolicyService {
     snapshot: EffectiveAccessSnapshot,
     usage?: EntitlementUsage,
   ): EffectiveAccess {
+    // Effective status is evaluated each request, not only when a snapshot is rebuilt.
+    const effectiveStatus = statusAt(snapshot);
+    const mayMutate = effectiveStatus === "active" || effectiveStatus === "trial";
     const can = (
       feature: EntitlementFeatureKey,
     ): boolean => {
-      if (
-        snapshot.status === "expired" ||
-        snapshot.status === "suspended" ||
-        snapshot.status === "cancelled"
-      ) {
+      if (!mayMutate) {
         return false;
       }
 
@@ -112,6 +112,7 @@ export class EntitlementPolicyService {
         resource: EntitlementResourceKey,
         increase = 1,
       ) {
+        if (!mayMutate) return false;
         const max = limit(resource);
         if (max === null) return true;
         return used(resource) + increase <= max;
@@ -129,7 +130,7 @@ export class EntitlementPolicyService {
         return snapshot.licenseModel;
       },
       get status() {
-        return snapshot.status;
+        return effectiveStatus;
       },
     };
   }
