@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { parseStudentPricing, calculateStudentQuote } from "./student-pricing";
 import { PrismaService } from "../prisma/prisma.service";
 import { SubscriptionCalculatorService } from "./subscription-calculator.service";
 import type { BillingCycle } from "./types/subscription.types";
@@ -99,11 +100,59 @@ export class PricingResolutionService {
             }),
       ]);
 
-    const listAmount =
-      this.calculator.priceForCycle(
-        plan,
-        input.billingCycle,
-      );
+    // Commercial billing is based on current, account-scoped cloud student records.
+    // Match the Stage 4 sync quota count: distinct live student identities,
+    // not copies of the same student on multiple devices.
+    let studentPricing;
+    try {
+      studentPricing = parseStudentPricing(plan.metadata);
+    } catch (error) {
+      throw new BadRequestException((error as Error).message);
+    }
+    if (studentPricing.mode !== "fixed") {
+      if (plan.licenseModel !== "subscription" || plan.deploymentMode !== "eleeveon_cloud") {
+        throw new BadRequestException("This plan needs a separate license purchase workflow.");
+      }
+      if (studentPricing.billingPeriod !== input.billingCycle) {
+        throw new BadRequestException("Select the plan's configured student-pricing billing period.");
+      }
+      if (input.privateOfferCode || input.pricingOverrideId || assignment || override) {
+        throw new BadRequestException("Student-priced custom offers are not yet supported by verified checkout.");
+      }
+    }
+
+    let studentCount: number | undefined;
+    let listAmount: number;
+    if (studentPricing.mode !== "fixed") {
+      const rows = await this.prisma.syncRecord.findMany({
+        where: { accountId: input.accountId, tableName: "students", isDeleted: false },
+        select: { localId: true, payload: true },
+      });
+      const ids = new Set<string>();
+      for (const row of rows) {
+        const payload = (row.payload && typeof row.payload === "object" && !Array.isArray(row.payload))
+          ? row.payload as Record<string, unknown> : {};
+        // Match the Stage 4 server limit count, which excludes only
+        // SyncRecord tombstones. A status change alone is not a deletion.
+        const studentId = String(payload.id || row.localId || "").trim();
+        if (studentId) ids.add(studentId);
+      }
+      studentCount = ids.size;
+      if (!studentCount) {
+        throw new BadRequestException("No active synchronized students are available for an authoritative quote. Synchronize admissions first.");
+      }
+      if (plan.maxStudents !== null && studentCount > plan.maxStudents) {
+        throw new BadRequestException("Student count exceeds this plan's maximum. Choose a suitable plan.");
+      }
+      listAmount = calculateStudentQuote(studentPricing, studentCount);
+      // SubscriptionChangeOrder amounts are Prisma Int and represent whole GHS.
+      // Avoid silent truncation or unintended fractional billing.
+      if (!Number.isSafeInteger(listAmount)) {
+        throw new BadRequestException("This plan's calculated amount is not a whole Ghana cedi. Update pricing before checkout.");
+      }
+    } else {
+      listAmount = this.calculator.priceForCycle(plan, input.billingCycle);
+    }
 
     const offerPrice = assignment?.offer
       ? this.explicitPrice(
@@ -136,6 +185,8 @@ export class PricingResolutionService {
 
     return {
       plan,
+      studentCount,
+      studentPricingMode: studentPricing.mode,
       privateOfferAssignment: assignment,
       pricingOverride: override,
       currency:

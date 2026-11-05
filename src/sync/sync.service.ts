@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { AdmissionNumberService } from "../admissions/admission-number.service";
@@ -2738,6 +2738,59 @@ export class SyncService {
    * original upsert behaviour. Admission identity and SyncRecord are committed
    * in one serializable transaction (including any legacy identity backfill).
    */
+  /**
+   * Capacity is checked INSIDE the same SERIALIZABLE transaction as the
+   * student insertion. Conflicting concurrent admissions retry the entire
+   * transaction, including this read, rather than racing against a cached
+   * AccountUsageSnapshot. No changes to the quota snapshot are required here.
+   *
+   * Rollout: STUDENT_QUOTA_ENFORCEMENT=observe (default) logs only;
+   *          STUDENT_QUOTA_ENFORCEMENT=enforce rejects over-limit additions.
+   * This deliberately does not claim to guard other, unprovided write paths.
+   */
+  private async assertStudentCapacityInTransaction(
+    tx: Prisma.TransactionClient,
+    accountId: string,
+    incomingStudentId: string,
+  ): Promise<void> {
+    const mode = String(process.env.STUDENT_QUOTA_ENFORCEMENT || "observe").toLowerCase();
+    if (mode === "off") return;
+
+    const entitlement = await tx.accountEntitlement.findUnique({
+      where: { accountId },
+      select: { status: true, validFrom: true, validUntil: true, graceEndsAt: true, maxStudents: true },
+    });
+    const now = new Date();
+    const status = String(entitlement?.status || "missing").toLowerCase();
+    const datedOut = Boolean(entitlement?.validUntil && entitlement.validUntil <= now);
+    const notStarted = Boolean(entitlement?.validFrom && entitlement.validFrom > now);
+    const canAdmit = !!entitlement && !notStarted && !datedOut && (status === "active" || status === "trial");
+
+    // Count unique student identities, not duplicate device copies.
+    const rows = await tx.syncRecord.findMany({
+      where: { accountId, tableName: "students", isDeleted: false },
+      select: { localId: true, payload: true },
+    });
+    const ids = new Set<string>();
+    for (const row of rows) {
+      const p = (row.payload || {}) as Record<string, any>;
+      const id = this.cleanId(p.id || row.localId);
+      if (id) ids.add(id);
+    }
+    const isNewIdentity = !ids.has(incomingStudentId);
+    const limit = entitlement?.maxStudents ?? null;
+    const overLimit = isNewIdentity && limit !== null && ids.size >= limit;
+    if (canAdmit && !overLimit) return;
+
+    const reason = !canAdmit
+      ? `Student admission requires a current active or trial entitlement (status: ${status}${datedOut ? ", expired" : ""}).`
+      : `Student limit reached (${ids.size}/${limit}). Existing students may still be edited or exported.`;
+    if (mode === "enforce") throw new ConflictException(reason);
+    // Observe mode preserves access for existing schools while we test the
+    // enforcement rollout. The log contains no student personal information.
+    console.warn(`[student-quota][observe] account=${accountId} ${reason}`);
+  }
+
   private async upsertStudentWithAdmission(record: NormalizedSyncPushRecord) {
     const accountId = this.cleanId(record.accountId);
     const studentId = this.requireLocalId(record.localId, "students");
@@ -2766,6 +2819,18 @@ export class SyncService {
             const oldPayload = (existing.payload || {}) as Record<string, any>;
             if (this.cleanId(oldPayload.schoolId) !== schoolId || this.cleanId(oldPayload.branchId) !== branchId) {
               throw new BadRequestException("Moving a student to another branch requires a separate authorized transfer workflow.");
+            }
+            // A server-confirmed number is immutable via ordinary student sync.
+            // Do not let a stale (even higher-version) device change it back.
+            const registered = await tx.studentAdmissionIdentity.findUnique({
+              where: { accountId_studentId: { accountId, studentId } },
+            });
+            const confirmed = String(registered?.admissionNumber || oldPayload.admissionNumber || "").trim();
+            const pushed = String(record.payload?.admissionNumber || "").trim();
+            if (confirmed && pushed && this.admissionNumbers.normalizeNumber(pushed) !== this.admissionNumbers.normalizeNumber(confirmed)) {
+              // An ordinary sync push is not an authorized admission correction.
+              // Return the authoritative row and issue the existing conflict hint.
+              return { ...existing, admissionStale: true };
             }
             const incomingVersion = Number(record.version || 1);
             const incomingUpdatedAt = Number(record.updatedAt || Date.now());
@@ -2818,6 +2883,12 @@ export class SyncService {
             return tx.syncRecord.create({
               data: { accountId, tableName: "students", localId: studentId, cloudId: record.cloudId || undefined, deviceId: record.deviceId || undefined, version: record.version, updatedAt: BigInt(record.updatedAt), isDeleted: true, payload: newPayload },
             });
+          }
+
+          // Apply quota only to a new active student (including restoration).
+          // Edits to already-active students and deletions remain available at cap.
+          if (!existing || existing.isDeleted) {
+            await this.assertStudentCapacityInTransaction(tx, accountId, studentId);
           }
 
           const settings = await tx.syncRecord.findMany({

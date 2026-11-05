@@ -6,7 +6,6 @@ import { SubscriptionReconciliationService } from "./subscription-reconciliation
 @Injectable()
 export class SubscriptionJobsService {
   private readonly logger = new Logger(SubscriptionJobsService.name);
-
   constructor(
     private readonly renewals: SubscriptionRenewalService,
     private readonly reconciliation: SubscriptionReconciliationService,
@@ -18,22 +17,12 @@ export class SubscriptionJobsService {
     this.logger.log(`Processed ${result.length} due subscription renewals.`);
   }
 
-  /** Opt in only after Stage 1 payment/tenant regression tests pass. */
-  @Cron("*/15 * * * *")
-  async recoverConfirmedPayments() {
-    if (process.env.COMMERCIAL_RECOVERY_ENABLED !== "true") return;
-    try {
-      const report = await this.reconciliation.recoverConfirmedChanges({
-        limit: 25,
-        dryRun: false,
-      });
-      const failed = report.results.filter((entry) => entry.result === "failed").length;
-      if (report.scanned) {
-        this.logger.log(`Commercial recovery scanned ${report.scanned} order(s); ${failed} failed.`);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Commercial recovery cycle failed: ${message}`);
-    }
+  /** The Stage 5 lifecycle job is safe to deploy before activating expiry. */
+  @Cron("15 5 * * *")
+  async processTrials() {
+    const mode: "observe" | "enforce" =
+      process.env.TRIAL_EXPIRATION_JOB_MODE === "enforce" ? "enforce" : "observe";
+    const results = await this.reconciliation.processDueTrials(new Date(), mode);
+    this.logger.log(`Trial expiry ${mode}: found=${results.length} changed=${results.filter(r => r.changed).length} errors=${results.filter(r => r.error).length}`);
   }
 }

@@ -115,46 +115,30 @@ export class BillingService {
     ).trim();
   }
 
-  private verifyPaystackSignature(signature: string, rawBody?: Buffer) {
-    if (!signature || !Buffer.isBuffer(rawBody)) {
-      throw new BadRequestException("Missing signature or raw Paystack webhook payload.");
+  private verifyPaystackSignature(signature: string, body: any) {
+    if (!signature) {
+      throw new BadRequestException(
+        "Missing Paystack webhook signature."
+      );
     }
-    const expected = crypto.createHmac("sha512", this.getPaystackSecretKey())
-      .update(rawBody).digest();
-    if (!/^[0-9a-f]{128}$/i.test(signature)) {
-      throw new BadRequestException("Invalid Paystack webhook signature.");
-    }
-    const received = Buffer.from(signature, "hex");
-    if (received.length !== expected.length || !crypto.timingSafeEqual(expected, received)) {
-      throw new BadRequestException("Invalid Paystack webhook signature.");
-    }
-  }
 
-  // Paystack sends amounts in the smallest currency unit (pesewas for GHS).
-  // Never accept a provider-reported success without matching the local record.
-  private validatePaystackSettlement(payment: {
-    id: string; provider: string | null; providerReference: string | null;
-    amount: number; currency: string; accountId: string;
-    invoiceId: string | null; subscriptionId: string | null;
-  }, result: any, requestedReference: string) {
-    const data = result?.raw?.data;
-    const amount = Number(data?.amount);
-    const currency = String(data?.currency || "").toUpperCase();
-    const expectedAmount = Math.round(Number(payment.amount) * 100);
+    const secret = this.getPaystackSecretKey();
+
+    const hash = crypto
+      .createHmac("sha512", secret)
+      .update(JSON.stringify(body))
+      .digest("hex");
+
+    const left = Buffer.from(hash, "utf8");
+    const right = Buffer.from(signature, "utf8");
+
     if (
-      payment.provider !== "paystack" ||
-      payment.providerReference !== requestedReference ||
-      result?.status !== "paid" || result?.success !== true ||
-      result?.raw?.status !== true || data?.status !== "success" ||
-      data?.reference !== requestedReference ||
-      !Number.isSafeInteger(amount) || amount !== expectedAmount ||
-      currency !== String(payment.currency).toUpperCase() ||
-      (data?.metadata?.paymentId != null && data.metadata.paymentId !== payment.id) ||
-      (data?.metadata?.accountId != null && data.metadata.accountId !== payment.accountId) ||
-      (data?.metadata?.invoiceId != null && data.metadata.invoiceId !== payment.invoiceId) ||
-      (data?.metadata?.subscriptionId != null && data.metadata.subscriptionId !== payment.subscriptionId)
+      left.length !== right.length ||
+      !crypto.timingSafeEqual(left, right)
     ) {
-      throw new BadRequestException("Paystack verification does not match the recorded payment.");
+      throw new BadRequestException(
+        "Invalid Paystack webhook signature."
+      );
     }
   }
 
@@ -435,142 +419,81 @@ export class BillingService {
       raw?: any;
     },
   ) {
-    // Serialize fulfillment for this account in PostgreSQL. Both browser
-    // verification and a webhook may arrive simultaneously.
-    const existing = await this.prisma.appPayment.findUnique({
-      where: { id: paymentId },
-    });
+    const existing = await this.prisma.appPayment.findUnique({ where: { id: paymentId } });
     if (!existing) throw new NotFoundException("Payment not found.");
 
-    const paidAt = data?.paidAt ? new Date(data.paidAt) : new Date();
-    if (Number.isNaN(paidAt.getTime())) {
-      throw new BadRequestException("Invalid payment settlement timestamp.");
-    }
-
-    const result = await this.prisma.$transaction(async (tx) => {
-      // Advisory transaction lock is released on commit/rollback.
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${existing.accountId}))`;
-      const payment = await tx.appPayment.findUnique({
-        where: { id: paymentId },
-        include: { invoice: true, subscription: true, changeOrder: true },
-      });
-      if (!payment || payment.accountId !== existing.accountId) {
-        throw new NotFoundException("Payment not found for account.");
-      }
-      if (payment.status === "paid") {
-        return { paymentId: payment.id, changeOrderId: payment.changeOrder?.id || null };
-      }
-      if (payment.invoiceId) {
-        if (!payment.invoice ||
-            payment.invoice.accountId !== payment.accountId ||
-            payment.invoice.currency.toUpperCase() !== payment.currency.toUpperCase() ||
-            Number(payment.invoice.total) !== Number(payment.amount) ||
-            (payment.subscriptionId && payment.invoice.subscriptionId !== payment.subscriptionId)) {
-          throw new BadRequestException("Payment and invoice records do not match.");
+    // Validate settlement even on duplicate webhook and callback deliveries.
+    const studentVerified = await this.verifyStudentPaymentSettlement(existing.id);
+    const verifiedAt = new Date();
+    const paidAt = data?.paidAt ? new Date(data.paidAt) : verifiedAt;
+    if (!Number.isFinite(paidAt.getTime())) throw new BadRequestException("Invalid settlement time.");
+    const metadata = existing.metadata && typeof existing.metadata === "object" && !Array.isArray(existing.metadata)
+      ? existing.metadata as Record<string, any> : {};
+    const nextMetadata = studentVerified
+      ? {
+          ...metadata,
+          verifiedSettlement: {
+            provider: "paystack",
+            reference: existing.providerReference,
+            amount: existing.amount,
+            currency: existing.currency,
+            verifiedAt: verifiedAt.toISOString(),
+          },
         }
-      }
-      if (payment.subscription && payment.subscription.accountId !== payment.accountId) {
-        throw new BadRequestException("Subscription belongs to another account.");
-      }
+      : metadata;
 
-      const updated = await tx.appPayment.update({
-        where: { id: paymentId },
-        data: {
-          status: "paid",
-          providerReference: data?.providerReference || payment.providerReference,
-          receiptNumber: data?.receiptNumber || payment.receiptNumber || `RCT-${payment.id}`,
-          paidAt,
-          note: data?.note || payment.note,
-        },
-      });
-      if (payment.invoiceId) {
-        await tx.invoice.update({
-          where: { id: payment.invoiceId },
-          data: {
-            status: "paid",
-            paidAt,
-            amountPaid: payment.amount,
-            balance: 0,
-          },
-        });
-      }
-      if (payment.changeOrder) {
-        // Change-order application has its own serialized, idempotent
-        // transaction; retry it even when payment was previously marked paid.
-        return { paymentId: payment.id, changeOrderId: payment.changeOrder.id };
-      }
-      if (payment.subscriptionId && payment.invoiceId) {
-        const cycle = this.normalizeBillingCycle(payment.subscription?.billingCycle);
-        const period = this.calculateSubscriptionPeriod(cycle, paidAt);
-        await tx.accountSubscription.update({
-          where: { id: payment.subscriptionId },
-          data: {
-            status: "active",
-            billingCycle: cycle,
-            currentPeriodStart: period.currentPeriodStart,
-            currentPeriodEnd: period.currentPeriodEnd,
-            nextBillingDate: period.nextBillingDate,
-            cancelledAt: null,
-            cancelReason: null,
-          },
-        });
-        await tx.billingEvent.create({
-          data: {
-            accountId: payment.accountId,
-            type: "payment_received",
-            message: `Payment received: ${payment.currency} ${payment.amount}`,
-            metadata: {
-              paymentId: payment.id,
-              invoiceId: payment.invoiceId,
-              subscriptionId: payment.subscriptionId,
-              provider: payment.provider,
-              providerReference: updated.providerReference,
-              billingCycle: cycle,
-            },
-          },
-        });
-      }
-      return { paymentId: payment.id, changeOrderId: null };
+    // The status transition is CAS, not read-then-write. Two callbacks cannot
+    // both perform first-time settlement side effects.
+    const claimed = await this.prisma.appPayment.updateMany({
+      where: { id: paymentId, status: { not: "paid" } },
+      data: {
+        status: "paid",
+        providerReference: data?.providerReference || existing.providerReference,
+        receiptNumber: data?.receiptNumber || existing.receiptNumber || `RCT-${paymentId}`,
+        paidAt,
+        note: data?.note || existing.note,
+        ...(studentVerified ? { metadata: nextMetadata as Prisma.InputJsonValue } : {}),
+      },
     });
 
-    // If a previous process committed the payment but crashed before applying
-    // its change order, another verified callback safely resumes the work.
-    if (result.changeOrderId) {
-      return this.subscriptionChanges.applyPaidChangeOrder(result.changeOrderId);
+    // A previous callback may have marked paid but crashed before applying the
+    // subscription. Retry the idempotent activation in that case.
+    const current = await this.prisma.appPayment.findUnique({ where: { id: paymentId } });
+    if (!current || current.status !== "paid") {
+      throw new BadRequestException("Payment could not be marked paid.");
     }
-    return this.prisma.appPayment.findUnique({
-      where: { id: result.paymentId },
-      include: { invoice: true, subscription: { include: { plan: true } } },
-    });
+    if (!claimed.count && studentVerified) {
+      const proof = current.metadata && typeof current.metadata === "object" && !Array.isArray(current.metadata)
+        ? (current.metadata as Record<string, any>).verifiedSettlement : null;
+      if (proof?.reference !== current.providerReference || proof?.amount !== current.amount ||
+          proof?.currency !== current.currency) {
+        // A previous state may have been confirmed but lacked the proof because
+        // it was written by an older version. Restore only after verification.
+        await this.prisma.appPayment.updateMany({
+          where: { id: paymentId, status: "paid" },
+          data: { metadata: nextMetadata as Prisma.InputJsonValue },
+        });
+      }
+    }
+    return this.activateSubscriptionFromPayment(paymentId);
   }
 
   private async markPaymentFailed(
     paymentId: string,
-    data?: {
-      providerReference?: string;
-      note?: string;
-    }
+    data?: { providerReference?: string; note?: string },
   ) {
-    const existing = await this.prisma.appPayment.findUnique({
-      where: { id: paymentId },
-    });
-
-    if (!existing) {
-      throw new NotFoundException("Payment not found.");
-    }
-
-    if (existing.status === "paid") return existing;
-
-    return this.prisma.appPayment.update({
-      where: { id: paymentId },
+    const existing = await this.prisma.appPayment.findUnique({ where: { id: paymentId } });
+    if (!existing) throw new NotFoundException("Payment not found.");
+    // Race-safe: a delayed failed webhook cannot overwrite a settled payment.
+    await this.prisma.appPayment.updateMany({
+      where: { id: paymentId, status: { not: "paid" } },
       data: {
         status: "failed",
-        providerReference:
-          data?.providerReference || existing.providerReference,
-        note:
-          data?.note || existing.note || "Payment failed.",
+        providerReference: data?.providerReference || existing.providerReference,
+        note: data?.note || existing.note || "Payment failed.",
       },
     });
+    return this.prisma.appPayment.findUnique({ where: { id: paymentId } });
   }
 
   // =====================================================
@@ -854,18 +777,6 @@ export class BillingService {
       throw new BadRequestException("This package requires its dedicated activation or purchase workflow.");
     }
 
-    // Legacy subscribeToPlan changes the current plan before payment succeeds.
-    // Existing schools must use a quoted change order, which preserves access
-    // until verified settlement. Do not allow the legacy path to downgrade a pilot.
-    const existingSubscription = await this.prisma.accountSubscription.findUnique({
-      where: { accountId: actor.accountId },
-    });
-    if (existingSubscription) {
-      throw new BadRequestException(
-        "This account already has a package. Use the subscription quote/change-order checkout to change it without interrupting existing access.",
-      );
-    }
-
     const now = new Date();
     const period = this.calculateSubscriptionPeriod(
       billingCycle,
@@ -1005,6 +916,57 @@ export class BillingService {
     };
   }
 
+  /** Student-priced charging must be opted into explicitly, per Paystack environment. */
+  private assertStudentCheckoutEnabled() {
+    const mode = (process.env.STUDENT_PRICED_CHECKOUT_MODE || "off").trim().toLowerCase();
+    if (mode !== this.getPaystackMode() || !["test", "live"].includes(mode)) {
+      throw new BadRequestException(
+        "Student-priced checkout is disabled for this Paystack environment.",
+      );
+    }
+  }
+
+  /** Verify actual Paystack settlement rather than trusting browser/webhook payloads. */
+  private async verifyStudentPaymentSettlement(paymentId: string) {
+    const payment = await this.prisma.appPayment.findUnique({
+      where: { id: paymentId },
+      include: { changeOrder: { include: { toPlan: true } } },
+    });
+    if (!payment?.changeOrder) return false;
+    const order = payment.changeOrder;
+    let config;
+    try { config = parseStudentPricing(order.toPlan.metadata); }
+    catch { throw new BadRequestException("Destination pricing is invalid."); }
+    if (config.mode === "fixed") return false;
+    this.assertStudentCheckoutEnabled();
+    if (
+      payment.provider !== "paystack" || !payment.providerReference ||
+      payment.accountId !== order.accountId ||
+      payment.id !== order.paymentId ||
+      payment.invoiceId !== order.invoiceId ||
+      payment.amount !== order.amountDue ||
+      payment.currency !== order.currency ||
+      order.amountDue <= 0 ||
+      !["payment_pending", "paid", "applied"].includes(order.status)
+    ) throw new BadRequestException("Student subscription payment does not match its quote.");
+
+    const verified = await this.paymentProviderService.verifyPayment("paystack", payment.providerReference);
+    const details = verified.raw?.data;
+    const metadata = details?.metadata;
+    if (
+      verified.status !== "paid" || details?.status !== "success" ||
+      details?.reference !== payment.providerReference ||
+      details?.currency !== payment.currency ||
+      Number(details?.amount) !== payment.amount * 100 ||
+      !metadata || typeof metadata !== "object" ||
+      metadata.accountId !== payment.accountId ||
+      metadata.paymentId !== payment.id ||
+      metadata.changeOrderId !== order.id ||
+      metadata.invoiceId !== payment.invoiceId
+    ) throw new BadRequestException("Paystack settlement could not be matched to the original invoice and quote.");
+    return true;
+  }
+
   // =====================================================
   // VERSION-ONE SUBSCRIPTION QUOTES / CHANGE ORDERS
   // =====================================================
@@ -1049,12 +1011,93 @@ export class BillingService {
     return this.subscriptionChanges.cancel(actor.accountId, id);
   }
 
+  /** Read-only checkout recovery. Never initializes or repeats a payment. */
+  async recoverSubscriptionQuote(actor: AuthUser, id: string) {
+    let order = await this.subscriptionChanges.getForAccount(actor.accountId, id);
+    const payment = order.payment;
+    const studentPriced = parseStudentPricing(order.toPlan.metadata).mode !== "fixed";
+    if (!studentPriced) {
+      throw new BadRequestException("Recovery is only available for student-priced quotations.");
+    }
+    let verification: "not_needed" | "checked" | "unavailable" = "not_needed";
+    // An initialized transaction may have succeeded even if the browser never
+    // received a checkout URL. Check it without starting a new transaction.
+    if (payment && payment.status === "pending" && payment.provider === "paystack" &&
+        payment.providerReference && order.status === "payment_pending") {
+      try {
+        await this.verifyPayment(actor, payment.providerReference, "paystack");
+        verification = "checked";
+      } catch {
+        // Network errors, unknown provider transactions and transient provider
+        // failures are ambiguous: never turn them into a fresh charge attempt.
+        verification = "unavailable";
+      }
+      order = await this.subscriptionChanges.getForAccount(actor.accountId, id);
+    }
+    const currentPayment = order.payment;
+    const applied = order.status === "applied";
+    const authorizationUrl = !applied && currentPayment?.status === "pending" &&
+      typeof currentPayment.authorizationUrl === "string" &&
+      /^https:\/\/[^\s]+$/i.test(currentPayment.authorizationUrl) &&
+      (() => { try { const host = new URL(currentPayment.authorizationUrl).hostname.toLowerCase();
+        return host === "paystack.com" || host.endsWith(".paystack.com");
+      } catch { return false; } })()
+      ? currentPayment.authorizationUrl : null;
+    return {
+      changeOrderId: order.id,
+      status: order.status,
+      paymentStatus: currentPayment?.status ?? null,
+      verification,
+      applied,
+      // Existing provider session only: no new request, reference or charge.
+      authorizationUrl,
+      requiresManualReview: !applied && ["checkout_initializing", "payment_pending", "paid"].includes(order.status) &&
+        !authorizationUrl,
+      canStartNewPayment: false,
+    };
+  }
+
   async paySubscriptionQuote(
     actor: AuthUser,
     id: string,
     dto: PaySubscriptionChangeDto,
   ) {
     const order = await this.subscriptionChanges.getForAccount(actor.accountId, id);
+
+    const pricedPlan = order.toPlan;
+    if (!pricedPlan) throw new BadRequestException("Quotation plan is missing.");
+    let orderPricing;
+    try { orderPricing = parseStudentPricing(pricedPlan.metadata); }
+    catch { throw new BadRequestException("Quotation plan pricing is invalid."); }
+    const studentPriced = orderPricing.mode !== "fixed";
+    if (studentPriced) {
+      this.assertStudentCheckoutEnabled();
+      if (this.normalizeProvider(dto.provider, this.normalizePaymentMethod(dto.paymentMethod)) !== "paystack") {
+        throw new BadRequestException("Student-priced checkout requires verified Paystack payment.");
+      }
+      if (order.amountDue <= 0 || order.currency !== "GHS") {
+        throw new BadRequestException("Student-priced checkout requires a positive GHS quotation.");
+      }
+      const saved = (order.calculation && typeof order.calculation === "object" && !Array.isArray(order.calculation))
+        ? order.calculation as Record<string, any> : {};
+      if (!Number.isSafeInteger(saved.studentCount) || !saved.studentCount || saved.studentPricingMode !== orderPricing.mode) {
+        throw new BadRequestException("Quotation has no verifiable student-count snapshot. Request a new quote.");
+      }
+      // Recompute from the current account-scoped server records, never from a browser count.
+      const fresh = await this.subscriptionChanges.quote(order.accountId, {
+        toPlanId: order.toPlanId,
+        billingCycle: order.billingCycle as any,
+        changeType: order.changeType as any,
+        effectiveMode: "immediate",
+        taxRatePercent: Number(saved.taxRatePercent ?? 0),
+      });
+      if (
+        fresh.calculation?.studentCount !== saved.studentCount ||
+        fresh.money.listAmount !== order.baseAmount ||
+        fresh.money.amountDue !== order.amountDue ||
+        order.creditAmount !== 0 || order.discountAmount !== 0
+      ) throw new BadRequestException("Student enrollment or pricing changed. Request a new quotation before checkout.");
+    }
 
     if (order.status !== "quoted") {
       throw new BadRequestException(`Quotation is ${order.status}.`);
@@ -1082,44 +1125,80 @@ export class BillingService {
       throw new BadRequestException("Payer email is required for Paystack payments.");
     }
 
-    const invoice = await this.prisma.invoice.create({
-      data: {
-        accountId: actor.accountId,
-        subscriptionId: order.subscriptionId,
-        invoiceNumber: `INV-${Date.now()}`,
-        currency: order.currency,
-        subtotal: order.baseAmount,
-        discount: order.creditAmount + order.discountAmount,
-        tax: order.taxAmount,
-        total: order.amountDue,
-        amountPaid: 0,
-        balance: order.amountDue,
-        status: "issued",
-        dueDate: order.quoteExpiresAt,
-        note: `${order.changeType} subscription change`,
-        metadata: { changeOrderId: order.id },
-      },
-    });
+    const invoiceInput = {
+      accountId: actor.accountId,
+      subscriptionId: order.subscriptionId,
+      invoiceNumber: `INV-${crypto.randomUUID()}`,
+      currency: order.currency,
+      subtotal: order.baseAmount,
+      discount: order.creditAmount + order.discountAmount,
+      tax: order.taxAmount,
+      total: order.amountDue,
+      amountPaid: 0,
+      balance: order.amountDue,
+      status: "issued",
+      dueDate: order.quoteExpiresAt,
+      note: `${order.changeType} subscription change`,
+      metadata: { changeOrderId: order.id },
+    };
+    const paymentInput = {
+      accountId: actor.accountId,
+      subscriptionId: order.subscriptionId,
+      amount: order.amountDue,
+      currency: order.currency,
+      method, provider,
+      status: "pending",
+      payerName: dto.payerName || null,
+      payerPhone: dto.payerPhone || null,
+      payerEmail: dto.payerEmail || null,
+      note: `${order.changeType} subscription payment`,
+      metadata: { changeOrderId: order.id },
+    };
 
-    const payment = await this.prisma.appPayment.create({
-      data: {
-        accountId: actor.accountId,
-        subscriptionId: order.subscriptionId,
-        invoiceId: invoice.id,
-        amount: order.amountDue,
-        currency: order.currency,
-        method,
-        provider,
-        status: "pending",
-        payerName: dto.payerName || null,
-        payerPhone: dto.payerPhone || null,
-        payerEmail: dto.payerEmail || null,
-        note: `${order.changeType} subscription payment`,
-        metadata: { changeOrderId: order.id },
-      },
-    });
-
-    await this.subscriptionChanges.markPaymentPending(order.id, invoice.id, payment.id);
+    // A single transaction claims the quote, creates the invoice and payment,
+    // stores a deterministic Paystack reference, and links the order.
+    // No external HTTP request is made while holding this database transaction.
+    const { invoice, payment } = studentPriced
+      ? await this.prisma.$transaction(async (tx) => {
+          const claimed = await tx.subscriptionChangeOrder.updateMany({
+            where: {
+              id: order.id,
+              accountId: actor.accountId,
+              status: "quoted",
+              invoiceId: null, paymentId: null,
+              quoteExpiresAt: { gt: new Date() },
+            },
+            data: { status: "checkout_initializing" },
+          });
+          if (claimed.count !== 1) {
+            throw new BadRequestException("Checkout is already in progress or the quote expired. Recover the existing checkout.");
+          }
+          const createdInvoice = await tx.invoice.create({ data: invoiceInput });
+          const createdPayment = await tx.appPayment.create({
+            data: { ...paymentInput, invoiceId: createdInvoice.id },
+          });
+          const referencedPayment = await tx.appPayment.update({
+            where: { id: createdPayment.id },
+            data: { providerReference: createdPayment.id },
+          });
+          await tx.subscriptionChangeOrder.update({
+            where: { id: order.id },
+            data: {
+              invoiceId: createdInvoice.id,
+              paymentId: referencedPayment.id,
+              status: "payment_pending",
+            },
+          });
+          return { invoice: createdInvoice, payment: referencedPayment };
+        }, { timeout: 15000 })
+      : await (async () => {
+          const createdInvoice = await this.prisma.invoice.create({ data: invoiceInput });
+          const createdPayment = await this.prisma.appPayment.create({
+            data: { ...paymentInput, invoiceId: createdInvoice.id },
+          });
+          await this.subscriptionChanges.markPaymentPending(order.id, createdInvoice.id, createdPayment.id);
+          return { invoice: createdInvoice, payment: createdPayment };
+        })();
 
     if (provider !== "paystack") {
       return { changeOrderId: order.id, invoice, payment, requiresPayment: true };
@@ -1182,11 +1261,11 @@ export class BillingService {
       );
     }
 
-    if (provider !== "paystack") {
-      throw new BadRequestException("Manual payment verification is an operator-only workflow.");
-    }
-
-    const result = await this.paymentProviderService.verifyPayment("paystack", reference);
+    const result =
+      await this.paymentProviderService.verifyPayment(
+        provider,
+        reference
+      );
 
     const payment = await this.prisma.appPayment.findFirst({
       where: { providerReference: reference },
@@ -1199,16 +1278,6 @@ export class BillingService {
     assertSameAccountOrDeveloper(actor, payment.accountId);
 
     if (result.status === "paid") {
-      this.validatePaystackSettlement(payment, result, reference);
-      if (payment.invoiceId) {
-        const invoice = await this.prisma.invoice.findUnique({ where: { id: payment.invoiceId } });
-        if (!invoice || invoice.accountId !== payment.accountId ||
-          invoice.currency.toUpperCase() !== payment.currency.toUpperCase() ||
-          Number(invoice.total) !== Number(payment.amount) ||
-          (payment.subscriptionId && invoice.subscriptionId !== payment.subscriptionId)) {
-          throw new BadRequestException("Invoice and payment do not match.");
-        }
-      }
       return this.markPaymentPaid(payment.id, {
         providerReference:
           result.providerReference || reference,
@@ -1237,44 +1306,77 @@ export class BillingService {
   // PAYSTACK WEBHOOK
   // =====================================================
 
-  async handlePaystackWebhook(signature: string, body: any, rawBody?: Buffer) {
-    this.verifyPaystackSignature(signature, rawBody);
+  async handlePaystackWebhook(signature: string, body: any) {
+    this.verifyPaystackSignature(signature, body);
+
     const event = body?.event;
-    const reference = body?.data?.reference;
-    if (!event || typeof reference !== "string" || !reference) {
-      return { ok: true, ignored: true, reason: "Missing event or reference." };
+    const data = body?.data;
+    const reference = data?.reference;
+
+    if (!event || !reference) {
+      return {
+        ok: true,
+        ignored: true,
+        reason: "Missing event or reference.",
+      };
     }
-    if (event !== "charge.success") {
-      // Disputes, chargebacks and failed attempts require their own reviewed
-      // payment state machine. Never automatically revoke a prior paid result.
-      return { ok: true, ignored: true, event };
-    }
+
     const payment = await this.prisma.appPayment.findFirst({
-      where: { provider: "paystack", providerReference: reference },
+      where: { providerReference: reference },
     });
+
     if (!payment) {
-      return { ok: true, ignored: true, reason: "Payment record not found locally." };
+      return {
+        ok: true,
+        ignored: true,
+        reason: "Payment record not found locally.",
+      };
     }
-    // Independently obtain transaction status, amount and currency from Paystack.
-    // The signed event alone is not sufficient to settle an invoice.
-    const verified = await this.paymentProviderService.verifyPayment("paystack", reference);
-    this.validatePaystackSettlement(payment, verified, reference);
-    if (payment.invoiceId) {
-      const invoice = await this.prisma.invoice.findUnique({ where: { id: payment.invoiceId } });
-      if (!invoice || invoice.accountId !== payment.accountId ||
-        invoice.currency.toUpperCase() !== payment.currency.toUpperCase() ||
-        Number(invoice.total) !== Number(payment.amount) ||
-        (payment.subscriptionId && invoice.subscriptionId !== payment.subscriptionId)) {
-        throw new BadRequestException("Invoice and payment do not match.");
+
+    if (event === "charge.success") {
+      await this.markPaymentPaid(payment.id, {
+        providerReference: reference,
+        receiptNumber:
+          data?.receipt_number || payment.receiptNumber || undefined,
+        paidAt: data?.paid_at || new Date(),
+        note: payment.note || undefined,
+        raw: data,
+      });
+
+      return {
+        ok: true,
+        status: "paid",
+      };
+    }
+
+    if (event === "charge.dispute.create") {
+      // A dispute does not mean that a previously settled payment never
+      // occurred. Flag it for operator review without changing paid status.
+      await this.createBillingEvent({
+        accountId: payment.accountId,
+        type: "payment_dispute_review_required",
+        message: "Paystack dispute requires manual review.",
+        metadata: { paymentId: payment.id, providerReference: reference },
+      });
+      return { ok: true, status: "review_required" };
+    }
+
+    if (event === "charge.failed") {
+      if (payment.status === "paid") {
+        return { ok: true, status: "already_paid", ignored: true };
       }
+      await this.markPaymentFailed(payment.id, {
+        providerReference: reference,
+        note: data?.gateway_response || "Paystack reported payment failure.",
+      });
+      return { ok: true, status: "failed" };
     }
-    await this.markPaymentPaid(payment.id, {
-      providerReference: reference,
-      receiptNumber: verified.receiptNumber || payment.receiptNumber || undefined,
-      paidAt: verified.paidAt || new Date(),
-      raw: verified.raw,
-    });
-    return { ok: true, status: "paid" };
+
+    return {
+      ok: true,
+      ignored: true,
+      event,
+    };
   }
 
   // =====================================================
@@ -1490,7 +1592,6 @@ export class BillingService {
       paidAt?: string;
     }
   ) {
-    this.developerOnly(actor);
     const existing = await this.prisma.appPayment.findUnique({
       where: { id },
     });
@@ -1518,7 +1619,6 @@ export class BillingService {
       providerReference?: string;
     }
   ) {
-    this.developerOnly(actor);
     const existing = await this.prisma.appPayment.findUnique({
       where: { id },
     });
@@ -1541,7 +1641,6 @@ export class BillingService {
     id: string,
     dto: { note?: string }
   ) {
-    this.developerOnly(actor);
     const existing = await this.prisma.appPayment.findUnique({
       where: { id },
     });
@@ -1551,10 +1650,6 @@ export class BillingService {
     }
 
     assertSameAccountOrDeveloper(actor, existing.accountId);
-
-    if (existing.status === "paid") {
-      throw new BadRequestException("A paid payment cannot be cancelled using this endpoint.");
-    }
 
     return this.prisma.appPayment.update({
       where: { id },

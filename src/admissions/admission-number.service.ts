@@ -108,7 +108,10 @@ export class AdmissionNumberService {
       create: { accountId, schoolId, branchId, nextSequence: config.nextSequence },
       update: {},
     });
-    let candidate = Math.max(sequence.nextSequence, config.nextSequence);
+    // The branch setting is an INITIAL seed only. Once a server sequence exists,
+    // it is the sole authority. A stale device may still carry nextSequence=82
+    // after the server has been reconciled to 58; it must not jump back to 82.
+    let candidate = sequence.nextSequence;
     for (let attempts = 0; attempts < 100_000; attempts++, candidate++) {
       if (!Number.isSafeInteger(candidate)) throw new ConflictException("Admission sequence exceeds the safe integer limit.");
       const separator = config.prefix ? config.separator : "";

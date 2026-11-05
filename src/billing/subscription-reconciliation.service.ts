@@ -1,97 +1,88 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { EntitlementsService } from "../entitlements/entitlements.service";
-import { SubscriptionChangeService } from "./subscription-change.service";
 
 /**
- * Recover only already-confirmed paid changes. Never infer payment success from
- * a webhook payload or from a change-order status alone.
+ * Stage 5: subscription lifecycle reconciliation.
+ * Trial expiry is independently bounded by trialEndsAt. No conversion or payment
+ * is performed by this service. The scheduled job is observe-only by default.
  */
 @Injectable()
 export class SubscriptionReconciliationService {
   private readonly logger = new Logger(SubscriptionReconciliationService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly entitlements: EntitlementsService,
-    private readonly changes: SubscriptionChangeService,
   ) {}
 
-  /** Existing API: keep the previously supported account-state reconciliation. */
-  async reconcileAccount(accountId: string) {
+  async reconcileAccount(accountId: string, options: { observeOnly?: boolean } = {}) {
     const subscription = await this.prisma.accountSubscription.findUnique({
       where: { accountId },
     });
-    if (!subscription) return { accountId, status: "no_subscription" };
+    if (!subscription) return { accountId, status: "no_subscription", changed: false };
 
     const now = new Date();
-    let status = subscription.status;
-    if (subscription.currentPeriodEnd && subscription.currentPeriodEnd <= now) {
-      status = subscription.graceEndsAt && subscription.graceEndsAt > now
-        ? "grace"
-        : "expired";
+    const previousStatus = subscription.status;
+    let status = previousStatus;
+    // Do not allow a stale cancelled/expired record to be reactivated here.
+    if (previousStatus === "trial") {
+      // A trial without a recorded end is not silently given a fabricated end.
+      if (subscription.trialEndsAt && subscription.trialEndsAt <= now) {
+        status = "expired";
+      }
+    } else if (["active", "grace"].includes(previousStatus)) {
+      if (subscription.currentPeriodEnd && subscription.currentPeriodEnd <= now) {
+        status = subscription.graceEndsAt && subscription.graceEndsAt > now
+          ? "grace"
+          : "expired";
+      }
     }
-    if (status !== subscription.status) {
-      await this.prisma.accountSubscription.update({
-        where: { accountId },
-        data: { status },
-      });
+
+    if (status === previousStatus) {
+      return { accountId, status, changed: false };
+    }
+    if (options.observeOnly) {
+      this.logger.log(`Subscription reconciliation observation: account=${accountId} ${previousStatus}->${status}`);
+      return { accountId, status: previousStatus, prospectiveStatus: status, changed: false, observeOnly: true };
+    }
+
+    // Compare-and-set protects a trial upgraded or converted while the job was running.
+    const result = await this.prisma.accountSubscription.updateMany({
+      where: {
+        id: subscription.id,
+        status: previousStatus,
+        ...(previousStatus === "trial"
+          ? { trialEndsAt: { lte: now } }
+          : { currentPeriodEnd: { lte: now } }),
+      },
+      data: { status, entitlementVersion: { increment: 1 } },
+    });
+    if (!result.count) {
+      const fresh = await this.prisma.accountSubscription.findUnique({ where: { accountId } });
+      return { accountId, status: fresh?.status ?? "unknown", changed: false, raced: true };
     }
     await this.entitlements.rebuild(accountId);
-    return { accountId, status };
+    return { accountId, status, changed: true };
   }
 
-  /**
-   * A bounded, safe-to-repeat scan. It does NOT re-query providers, create
-   * payments, issue licences or apply delayed period-end changes.
-   *
-   * Rebuilds snapshots only for already-applied orders whose account's current
-   * subscription still points at that exact resulting plan; this avoids
-   * clobbering a later purchase or an independent licence.
-   */
-  async recoverConfirmedChanges(options: { limit?: number; dryRun?: boolean } = {}) {
-    const limit = Math.max(1, Math.min(100, options.limit ?? 25));
-    const dryRun = options.dryRun ?? true;
-    const now = new Date();
-    const orders = await this.prisma.subscriptionChangeOrder.findMany({
-      where: {
-        amountDue: { gt: 0 },
-        status: { in: ["paid", "payment_pending"] },
-        effectiveMode: "immediate",
-        effectiveAt: { lte: now },
-        payment: { is: { status: "paid" } },
-      },
-      orderBy: { updatedAt: "asc" },
-      take: limit,
-      include: { payment: true },
+  async processDueTrials(at = new Date(), mode: "observe" | "enforce" = "observe", limit = 100) {
+    const due = await this.prisma.accountSubscription.findMany({
+      where: { status: "trial", trialEndsAt: { lte: at } },
+      orderBy: { trialEndsAt: "asc" },
+      take: Math.max(1, Math.min(500, limit)),
+      select: { accountId: true },
     });
-
-    const results: Array<{ orderId: string; accountId: string; result: string; reason?: string }> = [];
-    for (const order of orders) {
-      // Defensive checks against cross-tenant links, changed amounts and
-      // cancelled orders. Only backend-verified paid payments qualify.
-      if (!order.payment ||
-          order.payment.accountId !== order.accountId ||
-          order.payment.id !== order.paymentId ||
-          order.payment.status !== "paid" ||
-          order.payment.currency.toUpperCase() !== order.currency.toUpperCase() ||
-          Number(order.payment.amount) !== Number(order.amountDue)) {
-        results.push({ orderId: order.id, accountId: order.accountId, result: "skipped", reason: "linked payment mismatch" });
-        continue;
-      }
-      if (dryRun) {
-        results.push({ orderId: order.id, accountId: order.accountId, result: "would_retry" });
-        continue;
-      }
+    const results: Array<{ accountId: string; status: string; changed: boolean; error?: string }> = [];
+    for (const item of due) {
       try {
-        await this.changes.applyPaidChangeOrder(order.id);
-        results.push({ orderId: order.id, accountId: order.accountId, result: "applied" });
+        const result = await this.reconcileAccount(item.accountId, { observeOnly: mode !== "enforce" });
+        results.push({ accountId: item.accountId, status: result.status, changed: result.changed });
       } catch (error) {
-        const reason = error instanceof Error ? error.message : "unknown error";
-        this.logger.warn(`Commercial recovery failed for order ${order.id}: ${reason}`);
-        results.push({ orderId: order.id, accountId: order.accountId, result: "failed", reason });
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Trial reconciliation failure account=${item.accountId}: ${message}`);
+        results.push({ accountId: item.accountId, status: "error", changed: false, error: message });
       }
     }
-    return { dryRun, scanned: orders.length, results };
+    return results;
   }
 }

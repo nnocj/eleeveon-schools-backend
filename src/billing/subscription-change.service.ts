@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { parseStudentPricing } from "./student-pricing";
 
 import { PrismaService } from "../prisma/prisma.service";
 import { EntitlementsService } from "../entitlements/entitlements.service";
@@ -70,6 +71,13 @@ export class SubscriptionChangeService {
       pricingOverrideId: dto.pricingOverrideId,
     });
 
+    // Stage 6 implementation 1: no unverified credits or prorations for
+    // a tiered plan. Only straightforward new/renewal quotes are allowed.
+    if (pricing.studentPricingMode !== "fixed" &&
+        !["new", "renewal"].includes(dto.changeType)) {
+      throw new BadRequestException("Student-priced plan changes other than new/renewal are not enabled yet.");
+    }
+
     const now = new Date();
 
     const effectiveMode: ChangeEffectiveMode =
@@ -77,6 +85,10 @@ export class SubscriptionChangeService {
       (dto.changeType === "downgrade"
         ? "period_end"
         : "immediate");
+
+    if (pricing.studentPricingMode !== "fixed" && effectiveMode !== "immediate") {
+      throw new BadRequestException("Student-priced quotes must take effect immediately after verified payment.");
+    }
 
     const effectiveAt =
       effectiveMode === "period_end" &&
@@ -176,6 +188,10 @@ export class SubscriptionChangeService {
           : pricing.privateOfferAssignment
             ? "private_offer"
             : "plan",
+        // Persisted into the change order for subsequent settlement verification.
+        studentCount: pricing.studentCount ?? null,
+        studentPricingMode: pricing.studentPricingMode,
+        authoritativeAt: pricing.studentCount == null ? null : now.toISOString(),
         taxRatePercent,
         proration,
       },
@@ -254,6 +270,12 @@ export class SubscriptionChangeService {
       id,
     );
 
+    // Payment could be settling: cancelling now would leave a paid invoice
+    // with an unusable order. Require reconciliation before operator action.
+    const studentPriced = parseStudentPricing(order.toPlan.metadata).mode !== "fixed";
+    if (studentPriced && ["checkout_initializing", "payment_pending", "paid", "scheduled"].includes(order.status)) {
+      throw new BadRequestException("Payment has started. Check or reconcile its existing transaction before cancellation.");
+    }
     if (
       ["applied", "cancelled", "expired"].includes(
         order.status,
@@ -273,226 +295,194 @@ export class SubscriptionChangeService {
     });
   }
 
-  async markPaymentPending(
-    orderId: string,
-    invoiceId: string,
-    paymentId: string,
-  ) {
-    const order =
-      await this.prisma.subscriptionChangeOrder.findUnique({
-        where: { id: orderId },
-      });
-
-    if (!order) {
-      throw new NotFoundException(
-        "Subscription change order not found.",
-      );
-    }
-
-    return this.prisma.subscriptionChangeOrder.update({
-      where: { id: orderId },
-      data: {
-        invoiceId,
-        paymentId,
-        status: "payment_pending",
-      },
+  async markPaymentPending(orderId: string, invoiceId: string, paymentId: string) {
+    const current = await this.prisma.subscriptionChangeOrder.findUnique({ where: { id: orderId } });
+    if (!current) throw new NotFoundException("Subscription change order not found.");
+    // A single order may be claimed once. This also prevents late checkout
+    // initialization from undoing an already-paid/applied order.
+    const plan = await this.prisma.subscriptionPlan.findUnique({
+      where: { id: current.toPlanId }, select: { metadata: true },
     });
+    if (!plan) throw new BadRequestException("Destination plan no longer exists.");
+    const pricing = parseStudentPricing(plan.metadata);
+    const allowedStatus = pricing.mode === "fixed" ? "quoted" : "checkout_initializing";
+    const claimed = await this.prisma.subscriptionChangeOrder.updateMany({
+      where: {
+        id: orderId,
+        status: allowedStatus,
+        invoiceId: null,
+        paymentId: null,
+      },
+      data: { invoiceId, paymentId, status: "payment_pending" },
+    });
+    if (claimed.count !== 1) {
+      throw new BadRequestException("Checkout has already been linked to a payment; recover the existing checkout.");
+    }
+    return this.prisma.subscriptionChangeOrder.findUnique({ where: { id: orderId } });
   }
 
-  /**
-   * Compatibility method called after Paystack/manual payment succeeds.
-   */
-  async applyPaidChangeOrder(
-    orderId: string,
-    appliedByUserId?: string,
-  ) {
-    const order =
-      await this.prisma.subscriptionChangeOrder.findUnique({
-        where: { id: orderId },
-      });
-
-    if (!order) {
-      throw new NotFoundException(
-        "Subscription change order not found.",
-      );
-    }
-
-    if (order.status === "applied") {
-      return order;
-    }
-
-    if (
-      !["paid", "payment_pending", "scheduled"].includes(
-        order.status,
-      )
-    ) {
-      throw new BadRequestException(
-        `Subscription change order cannot be applied from status ${order.status}.`,
-      );
-    }
-
-    if (order.status !== "paid") {
-      await this.prisma.subscriptionChangeOrder.update({
-        where: { id: order.id },
-        data: {
-          status: "paid",
-          paidAt: order.paidAt ?? new Date(),
-        },
-      });
-    }
-
-    return this.apply(order.id, {
-      paymentId: order.paymentId ?? undefined,
-      appliedByUserId,
+  /** Payment callbacks enter here, including repeated and concurrent webhooks. */
+  async applyPaidChangeOrder(orderId: string, appliedByUserId?: string) {
+    const order = await this.prisma.subscriptionChangeOrder.findUnique({
+      where: { id: orderId }, include: { toPlan: true },
     });
+    if (!order) throw new NotFoundException("Subscription change order not found.");
+    if (order.status === "applied") return order;
+    if (!["paid", "payment_pending", "scheduled"].includes(order.status)) {
+      throw new BadRequestException(`Cannot activate an order in status ${order.status}.`);
+    }
+
+    // Both fixed and student-priced paid orders must have an actual settled
+    // payment. A callback must never manufacture a paid quote from an unpaid one.
+    if (order.amountDue > 0) {
+      if (!order.paymentId || !order.invoiceId) {
+        throw new BadRequestException("Paid order is missing its payment/invoice.");
+      }
+      const payment = await this.prisma.appPayment.findUnique({ where: { id: order.paymentId } });
+      if (!payment || payment.status !== "paid" || payment.accountId !== order.accountId ||
+          payment.invoiceId !== order.invoiceId || payment.amount !== order.amountDue ||
+          payment.currency !== order.currency) {
+        throw new BadRequestException("Order cannot activate until its matching payment is settled.");
+      }
+    }
+
+    if (order.status === "payment_pending") {
+      const promoted = await this.prisma.subscriptionChangeOrder.updateMany({
+        where: { id: order.id, status: "payment_pending", paymentId: order.paymentId },
+        data: { status: "paid", paidAt: order.paidAt ?? new Date() },
+      });
+      if (!promoted.count) {
+        const fresh = await this.prisma.subscriptionChangeOrder.findUnique({ where: { id: order.id } });
+        if (fresh?.status === "applied") return fresh;
+        if (fresh?.status !== "paid") throw new BadRequestException("Order changed during settlement.");
+      }
+    }
+    return this.apply(order.id, { paymentId: order.paymentId ?? undefined, appliedByUserId });
   }
 
   async apply(
     changeOrderId: string,
-    options?: {
-      paymentId?: string;
-      appliedByUserId?: string;
-    },
+    options?: { paymentId?: string; appliedByUserId?: string },
   ) {
-    const order =
-      await this.prisma.subscriptionChangeOrder.findUnique({
-        where: { id: changeOrderId },
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Serialize all plan changes for one account in PostgreSQL, including
+      // duplicate webhook workers executing in different application replicas.
+      const initial = await tx.subscriptionChangeOrder.findUnique({ where: { id: changeOrderId } });
+      if (!initial) throw new NotFoundException("Subscription change order not found.");
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${initial.accountId}))`;
+      const order = await tx.subscriptionChangeOrder.findUnique({
+        where: { id: changeOrderId }, include: { toPlan: true },
       });
+      if (!order) throw new NotFoundException("Subscription change order not found.");
+      if (order.status === "applied") return { order, newlyApplied: false };
+      if (!["paid", "scheduled"].includes(order.status)) {
+        throw new BadRequestException(`Order cannot be applied from status ${order.status}.`);
+      }
 
-    if (!order) {
-      throw new NotFoundException(
-        "Subscription change order not found.",
-      );
-    }
-
-    if (order.status === "applied") {
-      return order;
-    }
-
-    if (
-      order.amountDue > 0 &&
-      !["paid", "scheduled"].includes(order.status)
-    ) {
-      throw new BadRequestException(
-        "The subscription change must be paid before it can be applied.",
-      );
-    }
-
-    const applied = await this.prisma.$transaction(
-      async (tx) => {
-        // All applications for one school are serialized, even if separate
-        // webhooks / workers attempt to fulfill the same order concurrently.
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${order.accountId}))`;
-        const fresh = await tx.subscriptionChangeOrder.findUnique({
-          where: { id: order.id },
-        });
-        if (!fresh) throw new NotFoundException("Subscription change order not found.");
-        if (fresh.status === "applied") return fresh;
-        if (!["paid", "scheduled"].includes(fresh.status)) {
-          throw new BadRequestException(`Cannot apply change order from ${fresh.status}.`);
+      let pricing;
+      try { pricing = parseStudentPricing(order.toPlan.metadata); }
+      catch { throw new BadRequestException("Destination plan pricing is invalid."); }
+      if (order.status === "scheduled" && pricing.mode !== "fixed") {
+        throw new BadRequestException("Student-priced scheduled changes are not supported.");
+      }
+      if (pricing.mode !== "fixed") {
+        const checkoutMode = (process.env.STUDENT_PRICED_CHECKOUT_MODE || "off").trim().toLowerCase();
+        const paystackMode = (process.env.PAYSTACK_MODE || (process.env.NODE_ENV === "production" ? "live" : "test")).trim().toLowerCase();
+        if (!(checkoutMode === paystackMode && ["test", "live"].includes(checkoutMode))) {
+          throw new BadRequestException("Student-priced activation is disabled.");
         }
-        const current = await tx.accountSubscription.findUnique({
-          where: { accountId: order.accountId },
-        });
-        // Prevent an old quotation overriding a newer package change.
-        if (fresh.fromPlanId && current?.planId !== fresh.fromPlanId) {
-          throw new BadRequestException("This quotation is stale; request a new quotation.");
+      }
+
+      if (order.amountDue > 0) {
+        if (!order.paymentId || !order.invoiceId) throw new BadRequestException("Order payment is missing.");
+        const payment = await tx.appPayment.findUnique({ where: { id: order.paymentId } });
+        if (!payment || payment.status !== "paid" || payment.accountId !== order.accountId ||
+            payment.invoiceId !== order.invoiceId || payment.amount !== order.amountDue ||
+            payment.currency !== order.currency) {
+          throw new BadRequestException("Payment does not match this order.");
         }
-        const subscription =
-          await tx.accountSubscription.upsert({
-            where: { accountId: order.accountId },
-            update: {
-              planId: order.toPlanId,
-              status: "active",
-              billingCycle: order.billingCycle,
-              deploymentMode: "connected",
-              syncPolicy: "full",
-              updatePolicy: "continuous",
-              currentPeriodStart:
-                order.newPeriodStart,
-              currentPeriodEnd: order.newPeriodEnd,
-              nextBillingDate: order.newPeriodEnd,
-              scheduledPlanId: null,
-              scheduledBillingCycle: null,
-              scheduledChangeAt: null,
-              scheduledChangeType: null,
-              cancelledAt: null,
-              cancelReason: null,
-              entitlementVersion: {
-                increment: 1,
-              },
-            },
-            create: {
-              accountId: order.accountId,
-              planId: order.toPlanId,
-              status: "active",
-              billingCycle: order.billingCycle,
-              deploymentMode: "connected",
-              syncPolicy: "full",
-              updatePolicy: "continuous",
-              currentPeriodStart:
-                order.newPeriodStart,
-              currentPeriodEnd: order.newPeriodEnd,
-              nextBillingDate: order.newPeriodEnd,
-              entitlementVersion: 1,
-            },
-          });
-
-        const existingPeriod =
-          await tx.subscriptionPeriod.findUnique({
-            where: {
-              changeOrderId: order.id,
-            },
-          });
-
-        if (!existingPeriod) {
-          await tx.subscriptionPeriod.create({
-            data: {
-              accountId: order.accountId,
-              subscriptionId: subscription.id,
-              planId: order.toPlanId,
-              billingCycle: order.billingCycle,
-              startsAt: order.newPeriodStart,
-              endsAt: order.newPeriodEnd,
-              sourceType: order.changeType,
-              sourceId: order.id,
-              changeOrderId: order.id,
-              currency: order.currency,
-              listAmount: order.baseAmount,
-              amountPaid: order.amountDue,
-              creditUsed: order.creditAmount,
-              discountAmount:
-                order.discountAmount,
-              status: "active",
-              calculationVersion:
-                order.calculationVersion,
-            },
-          });
+        if (pricing.mode !== "fixed") {
+          const proof = payment.metadata && typeof payment.metadata === "object" && !Array.isArray(payment.metadata)
+            ? (payment.metadata as Record<string, any>).verifiedSettlement : null;
+          if (payment.provider !== "paystack" || !payment.providerReference ||
+              proof?.provider !== "paystack" || proof.reference !== payment.providerReference ||
+              proof.amount !== payment.amount || proof.currency !== payment.currency) {
+            throw new BadRequestException("Verified Paystack settlement proof is missing.");
+          }
         }
+      } else if (pricing.mode !== "fixed") {
+        throw new BadRequestException("Student-priced plan cannot be activated without a paid transaction.");
+      }
 
-        return tx.subscriptionChangeOrder.update({
-          where: { id: order.id },
-          data: {
-            status: "applied",
-            paymentId:
-              options?.paymentId ??
-              order.paymentId,
-            paidAt:
-              order.paidAt ??
-              (order.amountDue === 0
-                ? new Date()
-                : undefined),
-            appliedAt: new Date(),
-            appliedByUserId:
-              options?.appliedByUserId,
-          },
-        });
-      },
-    );
-
-    await this.entitlements.rebuild(order.accountId);
-
-    return applied;
+      // Atomic state claim and all subscription side effects share one tx.
+      const claimed = await tx.subscriptionChangeOrder.updateMany({
+        where: { id: order.id, status: order.status },
+        data: {
+          status: "applied",
+          paymentId: options?.paymentId ?? order.paymentId,
+          appliedAt: new Date(),
+          appliedByUserId: options?.appliedByUserId,
+        },
+      });
+      if (claimed.count !== 1) throw new BadRequestException("Order was applied by another request.");
+      const subscription = await tx.accountSubscription.upsert({
+        where: { accountId: order.accountId },
+        update: {
+          planId: order.toPlanId,
+          status: "active",
+          billingCycle: order.billingCycle,
+          deploymentMode: "connected",
+          syncPolicy: "full",
+          updatePolicy: "continuous",
+          currentPeriodStart: order.newPeriodStart,
+          currentPeriodEnd: order.newPeriodEnd,
+          nextBillingDate: order.newPeriodEnd,
+          scheduledPlanId: null, scheduledBillingCycle: null,
+          scheduledChangeAt: null, scheduledChangeType: null,
+          cancelledAt: null, cancelReason: null,
+          entitlementVersion: { increment: 1 },
+        },
+        create: {
+          accountId: order.accountId,
+          planId: order.toPlanId,
+          status: "active", billingCycle: order.billingCycle,
+          deploymentMode: "connected", syncPolicy: "full", updatePolicy: "continuous",
+          currentPeriodStart: order.newPeriodStart,
+          currentPeriodEnd: order.newPeriodEnd,
+          nextBillingDate: order.newPeriodEnd,
+          entitlementVersion: 1,
+        },
+      });
+      // Unique changeOrderId ensures one subscription period per paid order.
+      await tx.subscriptionPeriod.upsert({
+        where: { changeOrderId: order.id },
+        create: {
+          accountId: order.accountId,
+          subscriptionId: subscription.id,
+          planId: order.toPlanId,
+          billingCycle: order.billingCycle,
+          startsAt: order.newPeriodStart,
+          endsAt: order.newPeriodEnd,
+          sourceType: order.changeType, sourceId: order.id,
+          changeOrderId: order.id,
+          currency: order.currency,
+          listAmount: order.baseAmount,
+          amountPaid: order.amountDue,
+          creditUsed: order.creditAmount,
+          discountAmount: order.discountAmount,
+          status: "active",
+          calculationVersion: order.calculationVersion,
+        },
+        update: {},
+      });
+      const applied = await tx.subscriptionChangeOrder.findUnique({ where: { id: order.id } });
+      return { order: applied!, newlyApplied: true };
+    }, { timeout: 15000 });
+    // Entitlement rebuilding is retryable; no second subscription period or
+    // entitlementVersion increment occurs when a duplicate webhook replays.
+    // An outbox/worker is still recommended for guaranteed delivery on crashes.
+    await this.entitlements.rebuild(result.order.accountId);
+    return result.order;
   }
 
   async scheduleDowngrade(

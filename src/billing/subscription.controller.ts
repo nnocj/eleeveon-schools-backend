@@ -41,17 +41,20 @@ export class SubscriptionController {
   }
 
   @Post("change-orders/:id/apply")
-  apply(
+  async apply(
     @Param("id") id: string,
     @Req() request: AuthRequest,
   ) {
+    // The ID alone must never grant access to another account's change order.
+    await this.changes.getForAccount(request.user.accountId, id);
     return this.changes.apply(id, {
       appliedByUserId: request.user.id,
     });
   }
 
   @Post("change-orders/:id/schedule")
-  schedule(@Param("id") id: string) {
+  async schedule(@Param("id") id: string, @Req() request: AuthRequest) {
+    await this.changes.getForAccount(request.user.accountId, id);
     return this.changes.scheduleDowngrade(id);
   }
 }
