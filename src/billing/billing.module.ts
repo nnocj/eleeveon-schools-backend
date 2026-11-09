@@ -24,6 +24,7 @@ import { SubscriptionChangeService } from "./subscription-change.service";
 import { SubscriptionRenewalService } from "./subscription-renewal.service";
 import { SubscriptionReconciliationService } from "./subscription-reconciliation.service";
 import { SubscriptionJobsService } from "./subscription-jobs.service";
+import { EntitlementRepairService } from "./entitlement-repair.service";
 
 import { PricingResolutionService } from "./pricing-resolution.service";
 
@@ -58,6 +59,7 @@ import { PricingOverridesService } from "./pricing-overrides.service";
     SubscriptionRenewalService,
     SubscriptionReconciliationService,
     SubscriptionJobsService,
+    EntitlementRepairService,
 
     PricingResolutionService,
     PrivateOffersService,

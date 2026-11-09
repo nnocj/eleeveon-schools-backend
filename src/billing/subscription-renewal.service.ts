@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { parseStudentPricing } from "./student-pricing";
 
 import {
   PrismaService,
@@ -20,6 +21,10 @@ type RenewalProcessingResult =
       accountId: string;
       orderId: string;
       status: "quoted";
+    }
+  | {
+      accountId: string;
+      status: "observed";
     }
   | {
       accountId: string;
@@ -46,6 +51,28 @@ export class SubscriptionRenewalService {
       );
     }
 
+    // A renewal should not create additional invoices while a quotation or
+    // payment for this exact billing boundary is still unresolved.
+    const existing = await this.prisma.subscriptionChangeOrder.findFirst({
+      where: {
+        accountId,
+        changeType: "renewal",
+        toPlanId: subscription.planId,
+        oldPeriodEnd: subscription.currentPeriodEnd,
+        status: { in: ["quoted", "checkout_initializing", "payment_pending", "paid", "applied", "scheduled"] },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existing) {
+      return existing;
+    }
+
+    const plan = await this.prisma.subscriptionPlan.findUnique({
+      where: { id: subscription.planId }, select: { metadata: true },
+    });
+    if (!plan) throw new NotFoundException("Subscription plan not found.");
+    const studentPriced = parseStudentPricing(plan.metadata).mode !== "fixed";
+    // Student-priced quotes are payable only for an immediate activation.
     return this.changes.createOrder(
       accountId,
       {
@@ -53,13 +80,14 @@ export class SubscriptionRenewalService {
         billingCycle:
           subscription.billingCycle as BillingCycle,
         changeType: "renewal",
-        effectiveMode: "period_end",
+        effectiveMode: studentPriced ? "immediate" : "period_end",
       },
     );
   }
 
   async processDueRenewals(
     at = new Date(),
+    mode: "observe" | "enforce" = "observe",
   ): Promise<RenewalProcessingResult[]> {
     const due =
       await this.prisma.accountSubscription.findMany({
@@ -78,16 +106,12 @@ export class SubscriptionRenewalService {
 
     for (const subscription of due) {
       try {
-        const order =
-          await this.quoteRenewal(
-            subscription.accountId,
-          );
-
-        results.push({
-          accountId: subscription.accountId,
-          orderId: order.id,
-          status: "quoted",
-        });
+        if (mode === "observe") {
+          results.push({ accountId: subscription.accountId, status: "observed" });
+          continue;
+        }
+        const order = await this.quoteRenewal(subscription.accountId);
+        results.push({ accountId: subscription.accountId, orderId: order.id, status: "quoted" });
       } catch (error) {
         results.push({
           accountId: subscription.accountId,
