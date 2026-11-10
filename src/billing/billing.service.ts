@@ -1000,6 +1000,7 @@ export class BillingService {
     pricingOverrideId: dto.pricingOverrideId,
     taxRatePercent: dto.taxRatePercent,
     requestedByUserId: actor.id,
+    requestedStudentCount: dto.requestedStudentCount,
   });
 }
 
@@ -1083,8 +1084,10 @@ export class BillingService {
       if (!Number.isSafeInteger(saved.studentCount) || !saved.studentCount || saved.studentPricingMode !== orderPricing.mode) {
         throw new BadRequestException("Quotation has no verifiable student-count snapshot. Request a new quote.");
       }
-      // Recompute from the current account-scoped server records, never from a browser count.
+      // Revalidate prepaid capacity against live enrollment and current pricing;
+      // the server-verified purchased quantity remains immutable throughout checkout.
       const fresh = await this.subscriptionChanges.quote(order.accountId, {
+        requestedStudentCount: Number(saved.prepaidStudentLimit ?? saved.studentCount),
         toPlanId: order.toPlanId,
         billingCycle: order.billingCycle as any,
         changeType: order.changeType as any,

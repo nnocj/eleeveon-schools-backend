@@ -21,6 +21,7 @@ export class PricingResolutionService {
     billingCycle: BillingCycle;
     privateOfferCode?: string;
     pricingOverrideId?: string;
+    requestedStudentCount?: number;
     at?: Date;
   }) {
     const at = input.at ?? new Date();
@@ -101,6 +102,8 @@ export class PricingResolutionService {
             }),
       ]);
 
+    // Prepaid school capacity is selected by the customer, calculated on the server,
+    // and cannot be lower than existing synchronized enrollment.
     // Commercial billing is based on current, account-scoped cloud student records.
     // Match the Stage 4 sync quota count: distinct live student identities,
     // not copies of the same student on multiple devices.
@@ -138,9 +141,27 @@ export class PricingResolutionService {
         const studentId = String(payload.id || row.localId || "").trim();
         if (studentId) ids.add(studentId);
       }
-      studentCount = ids.size;
+      const currentlyEnrolled = ids.size;
+      const requested = input.requestedStudentCount;
+      if (requested !== undefined && (!Number.isSafeInteger(requested) || requested < 1 || requested > 1000000)) {
+        throw new BadRequestException("Select a valid prepaid student allowance between 1 and 1,000,000.");
+      }
+      if (requested !== undefined && requested < currentlyEnrolled) {
+        throw new BadRequestException(`You already have ${currentlyEnrolled} synchronized students. Purchase at least that many student places.`);
+      }
+      // For scheduled renewals with no explicit quantity, reuse the current
+      // paid allowance rather than reverting to the enrollment count.
+      const existingSubscription = requested === undefined
+        ? await this.prisma.accountSubscription.findUnique({ where: { accountId: input.accountId }, select: { planId: true, metadata: true } })
+        : null;
+      const existingMeta = existingSubscription?.metadata && typeof existingSubscription.metadata === "object" && !Array.isArray(existingSubscription.metadata)
+        ? existingSubscription.metadata as Record<string, unknown> : {};
+      const previousAllowance = existingSubscription?.planId === plan.id &&
+        Number.isSafeInteger(existingMeta.prepaidStudentLimit) && Number(existingMeta.prepaidStudentLimit) > 0
+          ? Number(existingMeta.prepaidStudentLimit) : 0;
+      studentCount = requested ?? Math.max(currentlyEnrolled, previousAllowance);
       if (!studentCount) {
-        throw new BadRequestException("No active synchronized students are available for an authoritative quote. Synchronize admissions first.");
+        throw new BadRequestException("Choose the number of student places you want to prepay before requesting a quotation.");
       }
       if (plan.maxStudents !== null && studentCount > plan.maxStudents) {
         throw new BadRequestException("Student count exceeds this plan's maximum. Choose a suitable plan.");

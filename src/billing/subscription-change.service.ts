@@ -31,6 +31,7 @@ interface LegacyCreateQuoteInput {
   pricingOverrideId?: string;
   taxRatePercent?: number;
   requestedByUserId?: string;
+  requestedStudentCount?: number;
 }
 
 @Injectable()
@@ -69,6 +70,7 @@ export class SubscriptionChangeService {
       billingCycle: dto.billingCycle,
       privateOfferCode,
       pricingOverrideId: dto.pricingOverrideId,
+      requestedStudentCount: dto.requestedStudentCount,
     });
 
     // Stage 6 implementation 1: no unverified credits or prorations for
@@ -190,6 +192,8 @@ export class SubscriptionChangeService {
             : "plan",
         // Persisted into the change order for subsequent settlement verification.
         studentCount: pricing.studentCount ?? null,
+        prepaidStudentLimit: pricing.studentPricingMode !== "fixed" ? pricing.studentCount ?? null : null,
+        purchaseType: pricing.studentPricingMode !== "fixed" ? "prepaid_capacity" : null,
         studentPricingMode: pricing.studentPricingMode,
         authoritativeAt: pricing.studentCount == null ? null : now.toISOString(),
         taxRatePercent,
@@ -215,6 +219,7 @@ export class SubscriptionChangeService {
       privateOfferCode: input.privateOfferCode,
       pricingOverrideId: input.pricingOverrideId,
       taxRatePercent: input.taxRatePercent,
+      requestedStudentCount: input.requestedStudentCount,
     });
 
     return this.persistQuote(
@@ -425,10 +430,29 @@ export class SubscriptionChangeService {
         },
       });
       if (claimed.count !== 1) throw new BadRequestException("Order was applied by another request.");
+      // Capture paid capacity only after verified settlement. Never allow
+      // a browser-supplied quantity to update an entitlement before payment.
+      const orderCalculation = order.calculation && typeof order.calculation === "object" && !Array.isArray(order.calculation)
+        ? order.calculation as Record<string, unknown> : {};
+      const prepaid = pricing.mode !== "fixed";
+      const paidSeats = Number(orderCalculation.prepaidStudentLimit ?? orderCalculation.studentCount);
+      if (prepaid && (!Number.isSafeInteger(paidSeats) || paidSeats < 1)) {
+        throw new BadRequestException("Paid prepaid-capacity order has no valid purchased student allowance.");
+      }
+      const existingSubscription = await tx.accountSubscription.findUnique({
+        where: { accountId: order.accountId }, select: { metadata: true },
+      });
+      const existingMeta = existingSubscription?.metadata && typeof existingSubscription.metadata === "object" && !Array.isArray(existingSubscription.metadata)
+        ? existingSubscription.metadata as Record<string, unknown> : {};
+      const { prepaidStudentLimit: _oldLimit, prepaidPlanId: _oldPlan, prepaidSourceOrderId: _oldOrder, ...otherMetadata } = existingMeta;
+      const subscriptionMetadata = (prepaid
+        ? { ...otherMetadata, prepaidStudentLimit: paidSeats, prepaidPlanId: order.toPlanId, prepaidSourceOrderId: order.id }
+        : otherMetadata) as Prisma.InputJsonValue;
       const subscription = await tx.accountSubscription.upsert({
         where: { accountId: order.accountId },
         update: {
           planId: order.toPlanId,
+          metadata: subscriptionMetadata,
           status: "active",
           billingCycle: order.billingCycle,
           deploymentMode: "connected",
@@ -445,6 +469,7 @@ export class SubscriptionChangeService {
         create: {
           accountId: order.accountId,
           planId: order.toPlanId,
+          metadata: subscriptionMetadata,
           status: "active", billingCycle: order.billingCycle,
           deploymentMode: "connected", syncPolicy: "full", updatePolicy: "continuous",
           currentPeriodStart: order.newPeriodStart,

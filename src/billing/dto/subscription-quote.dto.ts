@@ -83,6 +83,13 @@ export class CreateSubscriptionQuoteDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  @Max(1000000)
+  requestedStudentCount?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
   @Min(0)
   @Max(100)
   taxRatePercent?: number;

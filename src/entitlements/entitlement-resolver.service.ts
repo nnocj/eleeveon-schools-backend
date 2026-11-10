@@ -385,7 +385,19 @@ export class EntitlementResolverService {
         graceEndsAt:
           subscription.graceEndsAt ?? null,
         features: this.planFeatures(plan),
-        limits: this.planLimits(plan),
+        limits: (() => {
+          const limits = this.planLimits(plan);
+          const metadata = subscription.metadata && typeof subscription.metadata === "object" && !Array.isArray(subscription.metadata)
+            ? subscription.metadata as Record<string, unknown> : {};
+          const seats = Number(metadata.prepaidStudentLimit);
+          if (subscription.status === "active" &&
+              metadata.prepaidPlanId === plan.id && Number.isSafeInteger(seats) && seats > 0) {
+            // The paid allocation is the account-specific maximum, constrained
+            // further by any plan-wide maximum.
+            limits.students = limits.students == null ? seats : Math.min(limits.students, seats);
+          }
+          return limits;
+        })(),
         version:
           subscription.entitlementVersion ?? 1,
         schemaVersion: 1,
