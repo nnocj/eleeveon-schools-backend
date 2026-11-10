@@ -269,35 +269,32 @@ export class SubscriptionChangeService {
   async cancel(
     accountId: string,
     id: string,
+    verifiedTerminalFailure = false,
   ) {
-    const order = await this.getForAccount(
-      accountId,
-      id,
-    );
-
-    // Payment could be settling: cancelling now would leave a paid invoice
-    // with an unusable order. Require reconciliation before operator action.
+    const order = await this.getForAccount(accountId, id);
+    if (["applied", "cancelled", "expired", "paid", "scheduled"].includes(order.status)) {
+      throw new BadRequestException(`Subscription quotation cannot be cancelled in status ${order.status}.`);
+    }
     const studentPriced = parseStudentPricing(order.toPlan.metadata).mode !== "fixed";
-    if (studentPriced && ["checkout_initializing", "payment_pending", "paid", "scheduled"].includes(order.status)) {
-      throw new BadRequestException("Payment has started. Check or reconcile its existing transaction before cancellation.");
+    const cancelFailedPayment = studentPriced && order.status === "payment_pending" && verifiedTerminalFailure;
+    if (studentPriced && order.status !== "quoted" && !cancelFailedPayment) {
+      throw new BadRequestException("Payment has started. Verify its terminal failure with Paystack before cancellation.");
     }
-    if (
-      ["applied", "cancelled", "expired"].includes(
-        order.status,
-      )
-    ) {
-      throw new BadRequestException(
-        `Subscription quotation is already ${order.status}.`,
-      );
+    if (cancelFailedPayment && (!order.paymentId || !order.payment ||
+        order.payment.accountId !== accountId || order.payment.status !== "failed" ||
+        !order.payment.providerReference)) {
+      throw new BadRequestException("The linked payment is not confirmed failed. Cancellation refused.");
     }
-
-    return this.prisma.subscriptionChangeOrder.update({
-      where: { id: order.id },
-      data: {
-        status: "cancelled",
-        cancelledAt: new Date(),
-      },
+    // The guarded write prevents a concurrent order-state transition from being overwritten.
+    // The Paystack transaction was verified as terminal by BillingService immediately before this call.
+    const changed = await this.prisma.subscriptionChangeOrder.updateMany({
+      where: { id: order.id, accountId, status: order.status,
+        ...(cancelFailedPayment ? { paymentId: order.paymentId } : {}) },
+      data: { status: "cancelled", cancelledAt: new Date(),
+        ...(cancelFailedPayment ? { failureReason: "Paystack verified terminal failed/abandoned before cancellation" } : {}) },
     });
+    if (changed.count !== 1) throw new BadRequestException("Quotation state changed; check payment again before cancelling.");
+    return this.getForAccount(accountId, id);
   }
 
   async markPaymentPending(orderId: string, invoiceId: string, paymentId: string) {

@@ -1008,8 +1008,27 @@ export class BillingService {
     return this.subscriptionChanges.getForAccount(actor.accountId, id);
   }
 
-  cancelSubscriptionQuote(actor: AuthUser, id: string) {
-    return this.subscriptionChanges.cancel(actor.accountId, id);
+  async cancelSubscriptionQuote(actor: AuthUser, id: string) {
+    const order = await this.subscriptionChanges.getForAccount(actor.accountId, id);
+    if (order.status === "quoted") return this.subscriptionChanges.cancel(actor.accountId, id);
+    if (order.status !== "payment_pending" || !order.payment ||
+        order.payment.status !== "failed" || order.payment.provider !== "paystack" ||
+        !order.payment.providerReference || order.payment.accountId !== actor.accountId ||
+        order.payment.id !== order.paymentId || order.payment.invoiceId !== order.invoiceId ||
+        order.payment.amount !== order.amountDue || order.payment.currency !== order.currency) {
+      throw new BadRequestException("This checkout is not confirmed terminally failed. Reconcile it before cancellation.");
+    }
+    // PaymentProviderService maps all non-successful Paystack statuses to "failed".
+    // Only the explicit terminal Paystack states below authorize cancellation.
+    // A pending/ongoing, unverified, inconsistent, or successful payment never does.
+    const verified = await this.paymentProviderService.verifyPayment("paystack", order.payment.providerReference);
+    const gateway = verified.raw?.data;
+    if (verified.status !== "failed" || !["failed", "abandoned"].includes(String(gateway?.status || "").toLowerCase()) ||
+        gateway?.reference !== order.payment.providerReference || gateway?.currency !== order.currency ||
+        Number(gateway?.amount) !== order.amountDue * 100) {
+      throw new BadRequestException("Paystack does not confirm a terminal failed transaction. Cancellation refused; request reconciliation.");
+    }
+    return this.subscriptionChanges.cancel(actor.accountId, id, true);
   }
 
   /** Read-only checkout recovery. Never initializes or repeats a payment. */
