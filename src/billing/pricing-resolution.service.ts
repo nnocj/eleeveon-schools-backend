@@ -111,7 +111,7 @@ export class PricingResolutionService {
       throw new BadRequestException((error as Error).message);
     }
     if (studentPricing.mode !== "fixed") {
-      if (plan.licenseModel !== "subscription" || plan.deploymentMode !== "eleeveon_cloud") {
+      if (plan.licenseModel !== "subscription" || !["eleeveon_cloud", "connected"].includes(plan.deploymentMode)) {
         throw new BadRequestException("This plan needs a separate license purchase workflow.");
       }
       if (studentPricing.billingPeriod !== input.billingCycle) {

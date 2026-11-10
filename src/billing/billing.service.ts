@@ -773,7 +773,7 @@ export class BillingService {
     if (pricing.mode !== "fixed") {
       throw new BadRequestException("Student-based checkout is not enabled yet. Request a quote; payment will be available after server-verified enrollment billing is implemented.");
     }
-    if (plan.licenseModel !== "subscription" || plan.deploymentMode !== "eleeveon_cloud") {
+    if (plan.licenseModel !== "subscription" || !["eleeveon_cloud", "connected"].includes(plan.deploymentMode)) {
       throw new BadRequestException("This package requires its dedicated activation or purchase workflow.");
     }
 

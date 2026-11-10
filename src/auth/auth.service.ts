@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -15,6 +16,7 @@ import {
   normalizeRole,
 } from "../common/roles";
 import { PrismaService } from "../prisma/prisma.service";
+import { EntitlementResolverService } from "../entitlements/entitlement-resolver.service";
 import {
   LoginDto,
   RegisterDto,
@@ -79,10 +81,13 @@ export type AuthenticatedSessionActor = {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly entitlementResolver: EntitlementResolverService,
   ) {}
 
   private jwtSecret(): string {
@@ -154,12 +159,16 @@ export class AuthService {
               },
             });
 
+          // Current public Free Trial uses sp002; older catalogues used trial.
+          // Only newly registered accounts are provisioned here.
           const trialPlan =
-            await tx.subscriptionPlan.findUnique({
+            await tx.subscriptionPlan.findFirst({
               where: {
-                code: "trial",
+                code: { in: ["sp002", "trial"] },
+                licenseModel: "trial",
                 active: true,
               },
+              orderBy: { updatedAt: "desc" },
             });
 
           if (trialPlan) {
@@ -267,6 +276,17 @@ export class AuthService {
           };
         },
       );
+
+    // Registration commits first; a rebuild failure must not cause a false
+    // registration failure or encourage a duplicate-account retry.
+    try {
+      await this.entitlementResolver.rebuild(result.account.id);
+    } catch (error) {
+      this.logger.error(
+        `New account ${result.account.id} requires entitlement reconciliation`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
 
     const permissionRows =
       await this.loadPermissionRevisionRows(
