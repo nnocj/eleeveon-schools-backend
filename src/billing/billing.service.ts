@@ -1077,6 +1077,41 @@ export class BillingService {
     };
   }
 
+  /**
+   * Owner-initiated recovery of an EXISTING Paystack transaction.
+   * Never creates a new quotation, payment reference or charge.
+   * Provider verification and the pre-existing idempotent activation path
+   * are authoritative; a browser claim of success is not.
+   */
+  async reconcilePaidSubscriptionQuote(actor: AuthUser, id: string) {
+    const order = await this.subscriptionChanges.getForAccount(actor.accountId, id);
+    if (order.status === "applied") {
+      return { changeOrderId: id, status: "applied", applied: true, alreadyApplied: true };
+    }
+    if (!["paid", "payment_pending"].includes(order.status)) {
+      throw new BadRequestException("This quotation is not awaiting paid-payment reconciliation.");
+    }
+    const payment = order.payment;
+    if (!payment || !order.paymentId || payment.id !== order.paymentId ||
+        payment.accountId !== actor.accountId || payment.invoiceId !== order.invoiceId ||
+        payment.amount !== order.amountDue || payment.currency !== order.currency ||
+        payment.provider !== "paystack" || !payment.providerReference) {
+      throw new BadRequestException("The quotation does not have a matching Paystack payment to reconcile.");
+    }
+    // verifyPayment calls Paystack directly, verifies the original signed data
+    // against the student-priced order, and invokes idempotent activation.
+    await this.verifyPayment(actor, payment.providerReference, "paystack");
+    const updated = await this.subscriptionChanges.getForAccount(actor.accountId, id);
+    return {
+      changeOrderId: id,
+      status: updated.status,
+      paymentStatus: updated.payment?.status ?? null,
+      applied: updated.status === "applied",
+      // Don't claim success just because Paystack reports paid.
+      requiresManualReview: updated.status !== "applied",
+    };
+  }
+
   async paySubscriptionQuote(
     actor: AuthUser,
     id: string,

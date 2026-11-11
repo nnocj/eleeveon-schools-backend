@@ -241,6 +241,15 @@ export class BillingController {
     return this.billingService.recoverSubscriptionQuote(req.user, id);
   }
 
+  /** Re-verify an existing Paystack settlement and apply its paid quote. */
+  @Post("subscription-quotes/:id/reconcile")
+  reconcilePaidSubscriptionQuote(
+    @Req() req: any,
+    @Param("id") id: string,
+  ) {
+    return this.billingService.reconcilePaidSubscriptionQuote(req.user, id);
+  }
+
   @Post("subscription-quotes/:id/pay")
   paySubscriptionQuote(
     @Req() req: any,
