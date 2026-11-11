@@ -1,0 +1,1 @@
+const fs = require('fs'); const s = fs.readFileSync('src/billing/subscription-change.service.ts','utf8'); if (!s.includes('pg_advisory_xact_lock(hashtext(${initial.accountId}))::text')) process.exit(1); console.log('PASS: advisory lock still used and result cast to text');

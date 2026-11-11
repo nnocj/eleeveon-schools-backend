@@ -371,7 +371,9 @@ export class SubscriptionChangeService {
       // duplicate webhook workers executing in different application replicas.
       const initial = await tx.subscriptionChangeOrder.findUnique({ where: { id: changeOrderId } });
       if (!initial) throw new NotFoundException("Subscription change order not found.");
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${initial.accountId}))`;
+      // PostgreSQL returns void here; cast it so Prisma 7 / adapter-pg can deserialize the row.
+      // The transaction-scoped advisory lock is still acquired and held until commit/rollback.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${initial.accountId}))::text AS "lockResult"`;
       const order = await tx.subscriptionChangeOrder.findUnique({
         where: { id: changeOrderId }, include: { toPlan: true },
       });
