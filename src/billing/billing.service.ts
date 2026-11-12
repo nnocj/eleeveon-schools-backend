@@ -1140,6 +1140,26 @@ export class BillingService {
       }
       // Revalidate prepaid capacity against live enrollment and current pricing;
       // the server-verified purchased quantity remains immutable throughout checkout.
+      if (order.changeType === "upgrade") {
+        const live = await this.prisma.accountSubscription.findUnique({ where: { accountId: order.accountId } });
+        const meta = live?.metadata && typeof live.metadata === "object" && !Array.isArray(live.metadata)
+          ? live.metadata as Record<string, unknown> : {};
+        if (!live || live.status !== "active" || live.planId !== order.toPlanId ||
+            live.id !== saved.upgradeSubscriptionId ||
+            Number(meta.prepaidStudentLimit) !== Number(saved.upgradeFromSeats) ||
+            (meta.prepaidSourceOrderId ?? null) !== (saved.upgradePreviousSourceOrderId ?? null) ||
+            live.currentPeriodStart?.toISOString() !== saved.upgradePeriodStart ||
+            live.currentPeriodEnd?.toISOString() !== saved.upgradePeriodEnd ||
+            Date.now() >= Date.parse(String(saved.upgradePeriodEnd)) ||
+            order.newPeriodEnd.toISOString() !== saved.upgradePeriodEnd ||
+            Number(saved.upgradeToSeats) !== Number(saved.studentCount) ||
+            order.amountDue !== Math.ceil(Number(saved.upgradeUnroundedGhs) - 1e-9) ||
+            order.creditAmount !== 0 || order.discountAmount !== 0) {
+          throw new BadRequestException("Upgrade quotation is stale. Check your existing orders and request a fresh quote; do not pay this one.");
+        }
+        // Upgrade amount is frozen at the quote time; time passing must not
+        // invalidate a properly priced 30-minute quotation.
+      } else {
       const fresh = await this.subscriptionChanges.quote(order.accountId, {
         requestedStudentCount: Number(saved.prepaidStudentLimit ?? saved.studentCount),
         toPlanId: order.toPlanId,
@@ -1154,6 +1174,7 @@ export class BillingService {
         fresh.money.amountDue !== order.amountDue ||
         order.creditAmount !== 0 || order.discountAmount !== 0
       ) throw new BadRequestException("Student enrollment or pricing changed. Request a new quotation before checkout.");
+      }
     }
 
     if (order.status !== "quoted") {

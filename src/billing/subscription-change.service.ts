@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import { parseStudentPricing } from "./student-pricing";
+import { parseStudentPricing, calculateStudentQuote } from "./student-pricing";
 
 import { PrismaService } from "../prisma/prisma.service";
 import { EntitlementsService } from "../entitlements/entitlements.service";
@@ -73,11 +73,28 @@ export class SubscriptionChangeService {
       requestedStudentCount: dto.requestedStudentCount,
     });
 
-    // Stage 6 implementation 1: no unverified credits or prorations for
-    // a tiered plan. Only straightforward new/renewal quotes are allowed.
+    const isCapacityUpgrade = pricing.studentPricingMode !== "fixed" && dto.changeType === "upgrade";
     if (pricing.studentPricingMode !== "fixed" &&
-        !["new", "renewal"].includes(dto.changeType)) {
-      throw new BadRequestException("Student-priced plan changes other than new/renewal are not enabled yet.");
+        !["new", "renewal", "upgrade"].includes(dto.changeType)) {
+      throw new BadRequestException("Unsupported student-priced change type.");
+    }
+    if (isCapacityUpgrade) {
+      const metadata = subscription?.metadata && typeof subscription.metadata === "object" && !Array.isArray(subscription.metadata)
+        ? subscription.metadata as Record<string, unknown> : {};
+      const oldLimit = Number(metadata.prepaidStudentLimit);
+      const requested = pricing.studentCount;
+      if (!subscription || subscription.status !== "active" || subscription.planId !== toPlanId ||
+          !subscription.currentPeriodStart || !subscription.currentPeriodEnd ||
+          subscription.currentPeriodEnd.getTime() <= Date.now() ||
+          subscription.billingCycle !== dto.billingCycle ||
+          metadata.prepaidPlanId !== toPlanId ||
+          !Number.isSafeInteger(oldLimit) || oldLimit < 1 ||
+          !Number.isSafeInteger(requested) || Number(requested) <= oldLimit) {
+        throw new BadRequestException("An active, unexpired Standard subscription with a smaller paid allowance is required for an upgrade.");
+      }
+      if (dto.taxRatePercent || dto.privateOfferId || dto.privateOfferCode || dto.pricingOverrideId) {
+        throw new BadRequestException("Custom taxes and offers are not supported for a capacity upgrade.");
+      }
     }
 
     const now = new Date();
@@ -98,8 +115,8 @@ export class SubscriptionChangeService {
         ? subscription.currentPeriodEnd
         : now;
 
-    const newPeriodStart = effectiveAt;
-    const newPeriodEnd = this.calculator.periodEnd(
+    let newPeriodStart = effectiveAt;
+    let newPeriodEnd = this.calculator.periodEnd(
       newPeriodStart,
       dto.billingCycle,
     );
@@ -110,7 +127,7 @@ export class SubscriptionChangeService {
       | undefined;
 
     if (
-      dto.changeType === "upgrade" &&
+      !isCapacityUpgrade && dto.changeType === "upgrade" &&
       effectiveMode === "immediate" &&
       subscription?.currentPeriodStart &&
       subscription.currentPeriodEnd
@@ -137,9 +154,50 @@ export class SubscriptionChangeService {
       };
     }
 
+    // Capacity increases are an adjustment to the CURRENT paid term, not a renewal.
+    // All legacy money columns are whole-GHS Prisma Int. We round the actual
+    // proportional difference UP to a whole GHS, visibly and consistently.
+    // A genuine pesewa-accurate charging system requires a currency migration.
+    let capacitySnapshot: Record<string, unknown> | null = null;
+    let capacityCharge: number | null = null;
+    if (isCapacityUpgrade && subscription?.currentPeriodStart && subscription.currentPeriodEnd) {
+      const meta = subscription.metadata as Record<string, unknown>;
+      const oldSeats = Number(meta.prepaidStudentLimit);
+      const config = parseStudentPricing(subscription.plan.metadata);
+      const oldFull = calculateStudentQuote(config, oldSeats);
+      const deltaFull = Math.max(0, pricing.listAmount - oldFull);
+      const startMs = subscription.currentPeriodStart.getTime();
+      const endMs = subscription.currentPeriodEnd.getTime();
+      const remaining = Math.max(0, Math.min(1, (endMs - now.getTime()) / (endMs - startMs)));
+      if (!(endMs > startMs) || remaining <= 0 || deltaFull <= 0) {
+        throw new BadRequestException("No payable remaining-term capacity increase is available.");
+      }
+      capacityCharge = Math.ceil(deltaFull * remaining - 1e-9);
+      if (!Number.isSafeInteger(capacityCharge) || capacityCharge < 1) {
+        throw new BadRequestException("Invalid calculated upgrade amount.");
+      }
+      capacitySnapshot = {
+        upgradeFromSeats: oldSeats,
+        upgradeToSeats: pricing.studentCount,
+        upgradeSubscriptionId: subscription.id,
+        upgradePreviousSourceOrderId: meta.prepaidSourceOrderId ?? null,
+        upgradePeriodStart: subscription.currentPeriodStart.toISOString(),
+        upgradePeriodEnd: subscription.currentPeriodEnd.toISOString(),
+        upgradeFullTermDeltaGhs: deltaFull,
+        upgradeRemainingFraction: remaining,
+        upgradeUnroundedGhs: deltaFull * remaining,
+        upgradeRounding: "ceil_to_whole_GHS_due_to_legacy_integer_columns",
+      };
+    }
+    if (isCapacityUpgrade && subscription?.currentPeriodStart && subscription.currentPeriodEnd) {
+      // Keep the original billing dates; do not purchase a new term.
+      newPeriodStart = subscription.currentPeriodStart;
+      newPeriodEnd = subscription.currentPeriodEnd;
+    }
+
     const beforeTax = Math.max(
       0,
-      pricing.baseAmount -
+      (capacityCharge ?? pricing.baseAmount) -
         creditAmount -
         pricing.discountAmount,
     );
@@ -155,8 +213,8 @@ export class SubscriptionChangeService {
 
     const money = this.calculator.money({
       currency: pricing.currency,
-      listAmount: pricing.listAmount,
-      baseAmount: pricing.baseAmount,
+      listAmount: capacityCharge ?? pricing.listAmount,
+      baseAmount: capacityCharge ?? pricing.baseAmount,
       creditAmount,
       discountAmount: pricing.discountAmount,
       taxAmount,
@@ -198,6 +256,7 @@ export class SubscriptionChangeService {
         authoritativeAt: pricing.studentCount == null ? null : now.toISOString(),
         taxRatePercent,
         proration,
+        ...(capacitySnapshot ?? {}),
       },
       calculationVersion: 1,
       quoteExpiresAt: new Date(
@@ -418,6 +477,23 @@ export class SubscriptionChangeService {
         throw new BadRequestException("Student-priced plan cannot be activated without a paid transaction.");
       }
 
+      if (order.changeType === "upgrade" && pricing.mode !== "fixed") {
+        const snap = order.calculation && typeof order.calculation === "object" && !Array.isArray(order.calculation)
+          ? order.calculation as Record<string, unknown> : {};
+        const live = await tx.accountSubscription.findUnique({ where: { accountId: order.accountId } });
+        const meta = live?.metadata && typeof live.metadata === "object" && !Array.isArray(live.metadata)
+          ? live.metadata as Record<string, unknown> : {};
+        if (!live || live.status !== "active" || live.planId !== order.toPlanId ||
+            live.id !== snap.upgradeSubscriptionId ||
+            Number(meta.prepaidStudentLimit) !== Number(snap.upgradeFromSeats) ||
+            (meta.prepaidSourceOrderId ?? null) !== (snap.upgradePreviousSourceOrderId ?? null) ||
+            live.currentPeriodStart?.toISOString() !== snap.upgradePeriodStart ||
+            live.currentPeriodEnd?.toISOString() !== snap.upgradePeriodEnd ||
+            !Number.isSafeInteger(Number(snap.upgradeToSeats)) ||
+            Number(snap.upgradeToSeats) <= Number(snap.upgradeFromSeats)) {
+          throw new BadRequestException("Paid upgrade needs manual reconciliation: the original allowance or subscription period has changed. Do not pay again.");
+        }
+      }
       // Atomic state claim and all subscription side effects share one tx.
       const claimed = await tx.subscriptionChangeOrder.updateMany({
         where: { id: order.id, status: order.status },
@@ -477,8 +553,10 @@ export class SubscriptionChangeService {
           entitlementVersion: 1,
         },
       });
-      // Unique changeOrderId ensures one subscription period per paid order.
-      await tx.subscriptionPeriod.upsert({
+      // A capacity upgrade adjusts the existing paid term; its invoice and
+      // applied order are the adjustment audit trail. Do not create a second
+      // overlapping SubscriptionPeriod (the schema forbids duplicate dates).
+      if (order.changeType !== "upgrade") await tx.subscriptionPeriod.upsert({
         where: { changeOrderId: order.id },
         create: {
           accountId: order.accountId,
