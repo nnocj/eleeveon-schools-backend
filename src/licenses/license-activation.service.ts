@@ -40,7 +40,7 @@ export class LicenseActivationService {
     const { license, activation, device } = await this.prisma.$transaction(
       async (tx) => {
         // Lock by licence, shared with deactivation below.
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`eleeveon-license:${licenseId}`}))`;
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${`eleeveon-license:${licenseId}`}))`;
 
         // Re-read under lock: suspension/revocation and active slots must be current.
         const license = await tx.perpetualLicense.findUnique({
@@ -180,7 +180,7 @@ export class LicenseActivationService {
 
   async deactivate(licenseId: string, deviceId: string, actor: AuthUser) {
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`eleeveon-license:${licenseId}`}))`;
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${`eleeveon-license:${licenseId}`}))`;
       const activation = await tx.licenseActivation.findUnique({
         where: { licenseId_deviceId: { licenseId, deviceId } },
       });

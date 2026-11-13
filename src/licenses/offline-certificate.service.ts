@@ -19,7 +19,7 @@ export class OfflineCertificateService {
     if(!kid || !privateKey) throw new ServiceUnavailableException('Offline certificate signing is not configured');
     try {
       return await this.prisma.$transaction(async tx=>{
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`offline-cert:${args.licenseId}`}))`;
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${`offline-cert:${args.licenseId}`}))`;
         const license=await tx.perpetualLicense.findUnique({where:{id:args.licenseId}});
         if(!license) throw new NotFoundException('License not found');
         if(license.accountId!==actor.accountId) throw new ForbiddenException('License does not belong to your account');
