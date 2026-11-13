@@ -76,7 +76,7 @@ export class IndependentCheckoutService {
     let payment: AppPayment;
     try {
       payment = await this.prisma.$transaction(async tx=>{
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`independent-purchase:${user.accountId}`}))`;
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${`independent-purchase:${user.accountId}`}))`;
         const pending=await tx.appPayment.findFirst({where:{accountId:user.accountId,provider:"paystack",method:"independent_purchase",status:{in:["pending","requires_customer_action","paid"]}},orderBy:{createdAt:"desc"}});
         if(pending && !pending.perpetualLicenseId)throw new ConflictException(`An earlier purchase needs recovery. Payment ID: ${pending.id}`);
         if(await tx.perpetualLicense.count({where:{accountId:user.accountId,status:{in:["active","pending"]}}}))throw new ConflictException("This account already has a perpetual licence. Contact support for an upgrade.");
@@ -151,7 +151,7 @@ export class IndependentCheckoutService {
     const rawLicenseKey=this.crypt.generateLicenseKey();const encryptedLicenseKey=this.encrypt(rawLicenseKey);
     let licenseId:string|undefined;
     const outcome=await this.prisma.$transaction(async tx=>{
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`independent-purchase:${payment.accountId}`}))`;
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${`independent-purchase:${payment.accountId}`}))`;
       const current=await tx.appPayment.findUnique({where:{id:payment.id}});
       if(!current || current.accountId!==user.accountId)throw new ForbiddenException("Purchase account mismatch.");
       if(current.perpetualLicenseId)return {licenseId:current.perpetualLicenseId,created:false};
