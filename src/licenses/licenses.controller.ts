@@ -18,6 +18,7 @@ import { CreatePerpetualLicenseDto } from "./dto/create-perpetual-license.dto";
 import { CreateLicenseUpgradeOfferDto } from "./dto/create-upgrade-offer.dto";
 import { ValidateLicenseDto } from "./dto/validate-license.dto";
 
+import { OfflineCertificateService } from "./offline-certificate.service";
 import { LicenseActivationService } from "./license-activation.service";
 import { LicenseUpgradeService } from "./license-upgrade.service";
 import { LicenseValidationService } from "./license-validation.service";
@@ -30,7 +31,19 @@ export class LicensesController {
     private readonly activations: LicenseActivationService,
     private readonly validation: LicenseValidationService,
     private readonly upgrades: LicenseUpgradeService,
+    private readonly offlineCertificates: OfflineCertificateService,
   ) {}
+
+  /** Issue only after a settled Paystack-backed permanent ownership and authorized device activation. */
+  @UseGuards(JwtAuthGuard)
+  @Post(":id/offline-certificate")
+  offlineCertificate(
+    @Param("id") licenseId: string,
+    @Body() body: { installationId: string },
+    @Req() request: AuthRequest,
+  ) {
+    return this.offlineCertificates.issue({licenseId,installationId:body.installationId},request.user);
+  }
 
   /**
    * Public activation endpoint. The raw licence key is the credential.

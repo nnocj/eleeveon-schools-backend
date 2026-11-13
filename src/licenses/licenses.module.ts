@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { EntitlementsModule } from "../entitlements/entitlements.module";
 
+import { OfflineCertificateService } from "./offline-certificate.service";
 import { LicenseActivationService } from "./license-activation.service";
 import { LicenseCryptoService } from "./license-crypto.service";
 import { LicensePolicyService } from "./license-policy.service";
@@ -15,6 +16,7 @@ import { PerpetualLicenseService } from "./perpetual-license.service";
   controllers: [LicensesController],
   providers: [
     LicenseCryptoService,
+    OfflineCertificateService,
     LicensePolicyService,
     PerpetualLicenseService,
     LicenseActivationService,

@@ -1,0 +1,15 @@
+import {test} from 'node:test'; import assert from 'node:assert/strict';import {generateKeyPairSync} from 'node:crypto';import {createRequire} from 'node:module';
+import {signOfflineCertificate} from '../src/licenses/offline-certificate-signing.ts';
+const require=createRequire(import.meta.url);
+const {verifyEnvelope}=require('../../desktop/offline-license.cjs');
+const keys=generateKeyPairSync('ec',{namedCurve:'prime256v1'});
+const privateKeyPem=keys.privateKey.export({type:'pkcs8',format:'pem'});
+const publicKeyPem=keys.publicKey.export({type:'spki',format:'pem'});
+const now=Math.floor(Date.now()/1000);const installationId='11111111-1111-4111-8111-111111111111';
+const claims={v:1,licenseId:'license',accountId:'account',installationId,edition:'independent_essentials',issuedAt:now,notBefore:now-30,expiresAt:null,entitledMajorVersion:1,limits:{schools:1,branches:1,users:null,students:null,teachers:null,devices:1}};
+const sign=(c)=>signOfflineCertificate({claims:c,keyId:'release1',privateKeyPem});
+test('backend sign -> Electron native verify',()=>assert.equal(verifyEnvelope(sign(claims),{release1:publicKeyPem},installationId).accountId,'account'));
+test('certificate tampering rejected',()=>{const e=sign(claims);e.payload=e.payload.replace('account','enemyxx');assert.throws(()=>verifyEnvelope(e,{release1:publicKeyPem},installationId));});
+test('another installation rejected',()=>assert.throws(()=>verifyEnvelope(sign(claims),{release1:publicKeyPem},'else')));
+test('expired certificate rejected',()=>assert.throws(()=>verifyEnvelope(sign({...claims,expiresAt:now-2}),{release1:publicKeyPem},installationId)));
+test('unknown issuer rejected',()=>assert.throws(()=>verifyEnvelope(sign(claims),{other:publicKeyPem},installationId)));

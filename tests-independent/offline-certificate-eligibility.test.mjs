@@ -1,0 +1,16 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';
+import {assertCertificateEligibility} from '../src/licenses/offline-certificate-eligibility.ts';
+const license={id:'license1',accountId:'account1',status:'active',deploymentMode:'offline_local',acquisitionMode:'outright',balanceRemaining:0,ownershipStatus:'completed',ownershipCompletedAt:new Date(),listAmount:50000,discountAmount:0,amountPaid:50000,licensedMajorVersion:1,maxSchools:1,maxBranches:3,maxUsers:null,maxStudents:null,maxTeachers:null,deviceLimit:1,requiresPeriodicValidation:false,licenseEdition:'independent_essentials'};
+const payment={accountId:'account1',status:'paid',amount:50000,provider:'paystack',providerReference:'PS-abc',paidAt:new Date()};
+const activation={accountId:'account1',deviceId:'11111111-1111-4111-8111-111111111111',status:'active',revokedAt:null};
+const good=()=>({license:{...license},payments:[{...payment}],activation:{...activation},accountId:'account1',installationId:activation.deviceId});
+test('paid owned activated essentials can issue',()=>assert.doesNotThrow(()=>assertCertificateEligibility(good())));
+test('no verified payments blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),payments:[]})));
+test('unverified manual payment blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),payments:[{...payment,provider:null}]})));
+test('not yet owned blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),license:{...license,ownershipStatus:'pending'}})));
+test('device mismatch blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),installationId:'another'})));
+test('revoked device blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),activation:{...activation,status:'revoked'}})));
+test('subscription blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),license:{...license,licenseEdition:'cloud_standard'}})));
+test('periodic online validation blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),license:{...license,requiresPeriodicValidation:true}})));
+test('cross-account blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),accountId:'wrong'})));
+test('underpayment blocked',()=>assert.throws(()=>assertCertificateEligibility({...good(),payments:[{...payment,amount:100}]})));
