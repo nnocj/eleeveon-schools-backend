@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma, type AppPayment } from "@prisma/client";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
@@ -9,6 +9,7 @@ import type { AuthUser } from "../common/auth-user";
 /** Customer checkout. Never trusts client-supplied price, account, or entitlement. */
 @Injectable()
 export class IndependentCheckoutService {
+  private readonly logger = new Logger(IndependentCheckoutService.name);
   constructor(private readonly prisma:PrismaService,private readonly crypt:LicenseCryptoService,private readonly entitlements:EntitlementsService){}
   private paystackKey(){
     const live=(process.env.PAYSTACK_MODE || (process.env.NODE_ENV==="production"?"live":"test"))==="live";
@@ -49,29 +50,77 @@ export class IndependentCheckoutService {
     if(plan.currency!=="GHS" || !Number.isSafeInteger(plan.priceOneTime) || (plan.priceOneTime??0)<=0)throw new BadRequestException("Package one-time price is not configured.");
     return plan;
   }
-  async start(actor:AuthUser,planId:string,payerEmail:string){
-    const user=await this.owner(actor);const plan=await this.planForSale(planId);
-    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payerEmail||""))throw new BadRequestException("Valid payer email required.");
-    // Fail closed until escrow and signing are configured; never accept paid funds without fulfilment configuration.
+  /** Validate deployment prerequisites before creating any payment record. */
+  private checkoutConfiguration() {
+    const key = this.paystackKey();
     this.escrowKey();
-    if(!process.env.ELEEVEON_OFFLINE_CERTIFICATE_PRIVATE_KEY_PEM || !process.env.ELEEVEON_OFFLINE_CERTIFICATE_KEY_ID)throw new ServiceUnavailableException("Permanent licence certificate signing is not configured.");
-    const payment=await this.prisma.$transaction(async tx=>{
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`independent-purchase:${user.accountId}`}))`;
-      const pending=await tx.appPayment.findFirst({where:{accountId:user.accountId,provider:"paystack",method:"independent_purchase",status:{in:["pending","requires_customer_action","paid"]}},orderBy:{createdAt:"desc"}});
-      if(pending && !pending.perpetualLicenseId)throw new ConflictException(`A purchase must be recovered first. Payment ID: ${pending.id}`);
-      if(await tx.perpetualLicense.count({where:{accountId:user.accountId,status:{in:["active","pending"]}}}))throw new ConflictException("This account already has a perpetual licence. Contact support for an upgrade.");
-      return tx.appPayment.create({data:{accountId:user.accountId,amount:plan.priceOneTime!,currency:"GHS",method:"independent_purchase",provider:"paystack",status:"pending",payerEmail:payerEmail.trim().toLowerCase(),metadata:{planId:plan.id,planCode:plan.code,edition:plan.deploymentMode,unit:"GHS",purchaseType:"outright"}}});
-    });
-    try{
-      const key=this.paystackKey();
-      const callback=(process.env.ELEEVEON_PUBLIC_FRONTEND_URL||"").replace(/\/$/,"");
-      if(!/^https:\/\//.test(callback))throw new ServiceUnavailableException("Public frontend callback URL must use HTTPS.");
-      const response=await fetch("https://api.paystack.co/transaction/initialize",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:JSON.stringify({email:payment.payerEmail,amount:payment.amount*100,currency:"GHS",reference:payment.id,callback_url:`${callback}/independent/start?paymentId=${payment.id}`,metadata:{accountId:user.accountId,planId:plan.id,paymentId:payment.id,purchaseType:"independent_outright"}})});
-      const result:any=await response.json();
-      if(!response.ok || result.status!==true || result.data?.reference!==payment.id || !String(result.data?.authorization_url||"").startsWith("https://checkout.paystack.com/"))throw new BadRequestException("Paystack did not return a verified checkout session.");
-      await this.prisma.appPayment.update({where:{id:payment.id},data:{status:"requires_customer_action",providerReference:payment.id,authorizationUrl:result.data.authorization_url,accessCode:result.data.access_code}});
-      return {paymentId:payment.id,amount:payment.amount,currency:payment.currency,authorizationUrl:result.data.authorization_url};
-    }catch(e){ /* Preserve ambiguous initialization for manual recovery; never allow duplicate payment. */ throw e;}
+    if (!process.env.ELEEVEON_OFFLINE_CERTIFICATE_PRIVATE_KEY_PEM || !process.env.ELEEVEON_OFFLINE_CERTIFICATE_KEY_ID) {
+      throw new ServiceUnavailableException("Certificate signing is not configured on the backend. Contact Eleeveon support before checkout.");
+    }
+    const callback = (process.env.ELEEVEON_PUBLIC_FRONTEND_URL || "").replace(/\/$/, "");
+    if (!/^https:\/\/[^/]+$/.test(callback)) {
+      throw new ServiceUnavailableException("The secure public frontend callback URL is not configured.");
+    }
+    return { key, callback };
+  }
+
+  async start(actor:AuthUser,planId:string,payerEmail:string){
+    const user=await this.owner(actor);
+    const plan=await this.planForSale(planId);
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payerEmail||""))throw new BadRequestException("Valid payer email required.");
+
+    // Fail closed BEFORE creating any payment. Never strand a payment because a
+    // known missing deployment secret or callback URL was discovered too late.
+    const { key, callback } = this.checkoutConfiguration();
+
+    let payment: AppPayment;
+    try {
+      payment = await this.prisma.$transaction(async tx=>{
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`independent-purchase:${user.accountId}`}))`;
+        const pending=await tx.appPayment.findFirst({where:{accountId:user.accountId,provider:"paystack",method:"independent_purchase",status:{in:["pending","requires_customer_action","paid"]}},orderBy:{createdAt:"desc"}});
+        if(pending && !pending.perpetualLicenseId)throw new ConflictException(`An earlier purchase needs recovery. Payment ID: ${pending.id}`);
+        if(await tx.perpetualLicense.count({where:{accountId:user.accountId,status:{in:["active","pending"]}}}))throw new ConflictException("This account already has a perpetual licence. Contact support for an upgrade.");
+        return tx.appPayment.create({data:{accountId:user.accountId,amount:plan.priceOneTime!,currency:"GHS",method:"independent_purchase",provider:"paystack",status:"pending",payerEmail:payerEmail.trim().toLowerCase(),metadata:{planId:plan.id,planCode:plan.code,edition:plan.deploymentMode,unit:"GHS",purchaseType:"outright"}}});
+      });
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      this.logger.error(`Unable to create independent purchase for account ${user.accountId}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new ServiceUnavailableException("The purchase could not be prepared by the billing database. Check Render backend logs and try again later.");
+    }
+
+    // Do not assume a network exception means Paystack did not initialize.
+    // Preserve the pending record for recovery, rather than allowing a second charge.
+    let response: Response;
+    try {
+      response=await fetch("https://api.paystack.co/transaction/initialize",{
+        method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},
+        body:JSON.stringify({email:payment.payerEmail,amount:payment.amount*100,currency:"GHS",reference:payment.id,callback_url:`${callback}/independent/start?paymentId=${encodeURIComponent(payment.id)}`,metadata:{accountId:user.accountId,planId:plan.id,paymentId:payment.id,purchaseType:"independent_outright"}}),
+        signal: AbortSignal.timeout(20000),
+      });
+    } catch (error) {
+      this.logger.error(`Paystack initialization transport failed for payment ${payment.id}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new ServiceUnavailableException(`The payment provider did not respond. Purchase reference: ${payment.id}. Use Recover Purchase before attempting again.`);
+    }
+
+    let result: any;
+    try { result=await response.json(); }
+    catch {
+      this.logger.error(`Invalid Paystack initialization response for payment ${payment.id}; HTTP ${response.status}`);
+      throw new ServiceUnavailableException(`The payment provider returned an unreadable response. Reference: ${payment.id}. Recover this purchase before retrying.`);
+    }
+    const checkoutUrl=String(result?.data?.authorization_url||"");
+    const checkoutValid=(()=>{try {const url=new URL(checkoutUrl);return url.protocol==="https:" && url.hostname==="checkout.paystack.com";}catch{return false;}})();
+    if(!response.ok || result?.status!==true || result?.data?.reference!==payment.id || !checkoutValid){
+      this.logger.error(`Paystack rejected or mismatched checkout initialization for payment ${payment.id}: HTTP ${response.status}, provider status ${String(result?.status)}, provider code ${String(result?.code||"unknown")}`);
+      throw new ServiceUnavailableException(`Paystack did not confirm checkout initialization. Reference: ${payment.id}. Recover this purchase before retrying.`);
+    }
+    try {
+      await this.prisma.appPayment.update({where:{id:payment.id},data:{status:"requires_customer_action",providerReference:payment.id,authorizationUrl:checkoutUrl,accessCode:result.data.access_code}});
+    } catch (error) {
+      this.logger.error(`Paystack initialized payment ${payment.id}, but database update failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new ServiceUnavailableException(`Paystack checkout was initialized but could not be saved. Reference: ${payment.id}. Recover this purchase; do not initiate another payment.`);
+    }
+    return {paymentId:payment.id,amount:payment.amount,currency:payment.currency,authorizationUrl:checkoutUrl};
   }
   async latest(actor:AuthUser){
     const user=await this.owner(actor);
