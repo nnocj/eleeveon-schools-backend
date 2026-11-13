@@ -10,7 +10,7 @@ export class OfflineCertificateService {
   constructor(private readonly prisma:PrismaService) {}
   async issue(args:{licenseId:string;installationId:string}, actor:AuthUser) {
     if(!actor || actor.active===false || !actor.accountId) throw new ForbiddenException('Authenticated account required');
-    if(!actor.memberships?.some(m=>m.accountId===actor.accountId && m.active!==false && (m.role==='owner' || m.role==='developer'))) {
+    if(!actor.memberships?.some(m=>m.accountId===actor.accountId && m.active!==false && (m.role==='owner' || m.role==='super_admin' || m.role==='developer'))) {
       throw new ForbiddenException('Account owner or authorized operator required');
     }
     if(!/^[0-9a-f-]{36}$/i.test(args.installationId)) throw new BadRequestException('Invalid native installation ID');

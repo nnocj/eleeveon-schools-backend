@@ -19,6 +19,14 @@ export class RegisterDto {
   @IsString()
   @MinLength(6)
   password!: string;
+
+  @IsOptional()
+  @IsString()
+  selectedPlanId?: string;
+
+  @IsOptional()
+  @IsString()
+  selectedBillingCycle?: string;
 }
 
 export class LoginDto {

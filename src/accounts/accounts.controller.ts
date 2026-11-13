@@ -122,6 +122,12 @@ export class AccountsController {
     );
   }
 
+  @Roles("owner", "super_admin")
+  @Post("me/close")
+  closeMyAccount(@Req() req: any, @Body() body: {currentPassword?: string; confirmation?: string}) {
+    return this.accountsService.closeOwnAccount(req.user, body);
+  }
+
   @Get("me/settings")
   getMySettings(@Req() req: any) {
     return this.accountsService.getAccountSettings(

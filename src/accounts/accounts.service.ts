@@ -1133,6 +1133,38 @@ export class AccountsService {
     return account;
   }
 
+  /** Owner-requested closure: reversible administrative close, never cascade-delete. */
+  async closeOwnAccount(actor: AuthUser, data: {currentPassword?: string; confirmation?: string}) {
+    if (!actor?.id || !actor.accountId || !ACCOUNT_OWNER_ROLES.has(String(actor.role))) {
+      throw new ForbiddenException("Only the authenticated account owner may close this account.");
+    }
+    const account = await this.prisma.account.findUnique({where:{id:actor.accountId},select:{id:true,name:true,status:true}});
+    if (!account || account.status !== "active") throw new ConflictException("Account is not active.");
+    if (String(data?.confirmation||"").trim() !== `CLOSE ${account.name}`) {
+      throw new BadRequestException(`Type CLOSE ${account.name} exactly to confirm.`);
+    }
+    const user = await this.prisma.appUser.findFirst({where:{id:actor.id,accountId:account.id,active:true}});
+    if (!user || !data?.currentPassword || !(await bcrypt.compare(data.currentPassword,user.passwordHash))) {
+      throw new ForbiddenException("Current password is incorrect.");
+    }
+    const [pendingPayments,activeLicenses,activeSubscriptions] = await Promise.all([
+      this.prisma.appPayment.count({where:{accountId:account.id,status:{in:["pending","processing","requires_customer_action"]}}}),
+      this.prisma.perpetualLicense.count({where:{accountId:account.id,status:{in:["active","pending"]}}}),
+      this.prisma.accountSubscription.count({where:{accountId:account.id,status:{in:["active","pending","past_due"]}}}),
+    ]);
+    if (pendingPayments || activeLicenses || activeSubscriptions) {
+      throw new ConflictException("Account closure requires Eleeveon support because a subscription, payment, or independent licence is active. No access or records were changed.");
+    }
+    await this.prisma.$transaction(async tx=>{
+      const updated = await tx.account.updateMany({where:{id:account.id,status:"active"},data:{status:"closed"}});
+      if (updated.count!==1) throw new ConflictException("Account status changed. Refresh and retry.");
+      await tx.userSession.updateMany({where:{accountId:account.id},data:{revokedAt:new Date()}});
+      await tx.auditLog.create({data:{accountId:account.id,actorUserId:actor.id,actorEmail:actor.email,actorRole:String(actor.role),action:"ACCOUNT_SELF_CLOSED",moduleKey:"accounts",entityType:"Account",entityId:account.id,metadata:{source:"owner_self_service",retainedRecords:true}}});
+    });
+    this.realtime.emitAccountDataChanged({accountId:account.id,changedTables:["accounts"],metadata:{action:"account-closed"}});
+    return {closed:true,accountId:account.id,message:"Account closed. Contact Eleeveon support for data erasure and financial retention requests."};
+  }
+
   async closeAccount(actor: AuthUser, accountId: string) {
     if (!isDeveloper(actor.role)) throw new ForbiddenException("Only developer can close platform accounts.");
     const account = await this.prisma.account.update({ where: { id: accountId }, data: { status: "closed" } });

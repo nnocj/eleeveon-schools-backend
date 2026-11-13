@@ -1,3 +1,5 @@
+import { IndependentCheckoutService } from "./independent-checkout.service";
+import { IndependentCheckoutController } from "./independent-checkout.controller";
 import { Module } from "@nestjs/common";
 
 import { EntitlementsModule } from "../entitlements/entitlements.module";
@@ -13,8 +15,9 @@ import { PerpetualLicenseService } from "./perpetual-license.service";
 
 @Module({
   imports: [EntitlementsModule],
-  controllers: [LicensesController],
+  controllers: [LicensesController, IndependentCheckoutController],
   providers: [
+    IndependentCheckoutService,
     LicenseCryptoService,
     OfflineCertificateService,
     LicensePolicyService,

@@ -159,17 +159,33 @@ export class AuthService {
               },
             });
 
-          // Current public Free Trial uses sp002; older catalogues used trial.
-          // Only newly registered accounts are provisioned here.
-          const trialPlan =
-            await tx.subscriptionPlan.findFirst({
-              where: {
-                code: { in: ["sp002", "trial"] },
-                licenseModel: "trial",
-                active: true,
-              },
-              orderBy: { updatedAt: "desc" },
-            });
+          // Explicit paid selection must NEVER be converted to a free trial.
+          // A paid plan is only a registration intent until verified purchase.
+          // Preserve legacy trial onboarding only when no plan ID is supplied.
+          const selectedPlanId = dto.selectedPlanId?.trim();
+          const selectedPlan = selectedPlanId ? await tx.subscriptionPlan.findFirst({
+            where: { id: selectedPlanId, active: true },
+          }) : null;
+          if (selectedPlanId && !selectedPlan) {
+            throw new BadRequestException("The selected package is unavailable.");
+          }
+          if (selectedPlan) {
+            const metadata = selectedPlan.metadata && typeof selectedPlan.metadata === "object" && !Array.isArray(selectedPlan.metadata)
+              ? selectedPlan.metadata as Record<string, unknown> : {};
+            const acquisitionModes = Array.isArray(selectedPlan.availableAcquisitionModes)
+              ? selectedPlan.availableAcquisitionModes : [];
+            if (metadata.publicVisible === false || metadata.visibility === "private" ||
+                selectedPlan.licenseModel === "complimentary" || selectedPlan.deploymentMode === "private_hosted" ||
+                (acquisitionModes.length > 0 && !acquisitionModes.some((m: string) => ["trial", "self_service", "outright", "installments"].includes(m)))) {
+              throw new BadRequestException("This package is not open for public registration.");
+            }
+          }
+          const trialPlan = selectedPlan
+            ? selectedPlan.licenseModel === "trial" ? selectedPlan : null
+            : await tx.subscriptionPlan.findFirst({
+                where: { code: { in: ["sp002", "trial"] }, licenseModel: "trial", active: true },
+                orderBy: { updatedAt: "desc" },
+              });
 
           if (trialPlan) {
             const now =
