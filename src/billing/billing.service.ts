@@ -699,20 +699,55 @@ export class BillingService {
       );
     }
 
-    return this.prisma.accountSubscription.findUnique({
-      where: { accountId: actor.accountId },
-      include: {
-        plan: true,
-        invoices: {
-          orderBy: { createdAt: "desc" },
-          take: 5,
+    // Preserve the subscription record for billing history, but do not let a
+    // stale trial mask an already-owned perpetual Independent licence.
+    const [subscription, licence] = await Promise.all([
+      this.prisma.accountSubscription.findUnique({
+        where: { accountId: actor.accountId },
+        include: {
+          plan: true,
+          invoices: { orderBy: { createdAt: "desc" }, take: 5 },
+          payments: { orderBy: { createdAt: "desc" }, take: 5 },
         },
-        payments: {
-          orderBy: { createdAt: "desc" },
-          take: 5,
+      }),
+      this.prisma.perpetualLicense.findFirst({
+        where: {
+          accountId: actor.accountId,
+          status: "active",
+          ownershipStatus: "completed",
         },
+        include: { plan: true },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+
+    if (!licence || !["sp003", "sp004"].includes(licence.plan.code)) {
+      return subscription;
+    }
+
+    // This is a display projection, not a mutation of AccountSubscription.
+    // Do not expose licence secrets or signing material in this response.
+    return {
+      ...(subscription ?? {}),
+      id: undefined,
+      planId: licence.planId,
+      plan: licence.plan,
+      status: "active",
+      billingCycle: "one_time",
+      trialEndsAt: null,
+      currentPeriodEnd: null,
+      effectiveLicense: {
+        id: licence.id,
+        status: licence.status,
+        licenseEdition: licence.licenseEdition,
+        deploymentMode: licence.deploymentMode,
+        acquisitionMode: licence.acquisitionMode,
+        ownershipStatus: licence.ownershipStatus,
       },
-    });
+      legacySubscription: subscription
+        ? { id: subscription.id, status: subscription.status, planId: subscription.planId }
+        : null,
+    };
   }
 
   // =====================================================
