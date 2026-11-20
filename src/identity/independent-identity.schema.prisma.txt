@@ -1,0 +1,26 @@
+// APPEND to your existing schema.prisma, then run prisma migrate deploy + prisma generate.
+model IndependentIdentityIssuer {
+  id String @id @default(uuid())
+  accountId String
+  licenseId String
+  installationId String
+  schoolId String
+  branchId String
+  schoolName String
+  branchName String @default("")
+  publicKeyPem String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  revocations IndependentIdentityRevocation[]
+  @@unique([licenseId, installationId, schoolId, branchId], name: "independentIssuerScope")
+  @@index([accountId])
+}
+model IndependentIdentityRevocation {
+  id String @id @default(uuid())
+  issuerId String
+  credentialId String
+  revokedAt DateTime @default(now())
+  issuer IndependentIdentityIssuer @relation(fields: [issuerId], references: [id], onDelete: Cascade)
+  @@unique([issuerId, credentialId])
+}

@@ -34,6 +34,7 @@ model Account {
   subscription                 AccountSubscription?
   systemSettings               AccountSystemSetting[]
   usageSnapshot                AccountUsageSnapshot?
+  admissionNumberSequences     AdmissionNumberSequence[]
   apiClients                   ApiClient[]
   apiKeys                      ApiKey[]
   payments                     AppPayment[]
@@ -66,6 +67,7 @@ model Account {
   RestoreOperation             RestoreOperation[]
   SecurityEvent                SecurityEvent[]
   storageUsage                 StorageUsage?
+  studentAdmissionIdentities   StudentAdmissionIdentity[]
   subscriptionChanges          SubscriptionChangeOrder[]
   subscriptionPeriods          SubscriptionPeriod[]
   records                      SyncRecord[]
@@ -73,8 +75,6 @@ model Account {
   sessions                     UserSession[]
   webhooks                     Webhook[]
   webhookLogs                  WebhookLog[]
-  admissionNumberSequences     AdmissionNumberSequence[]
-  studentAdmissionIdentities   StudentAdmissionIdentity[]
 
   @@index([email])
   @@index([status])
@@ -2085,19 +2085,15 @@ model UserTrustedDevice {
   @@index([userId])
 }
 
-// ======================================================
-// AUTHORITATIVE ADMISSION NUMBERING (SERVER-ONLY)
-// ======================================================
-
 model AdmissionNumberSequence {
   id           String   @id @default(uuid())
   accountId    String
-  account      Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
   schoolId     String
   branchId     String
   nextSequence Int      @default(1)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  account      Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@unique([accountId, schoolId, branchId])
   @@index([accountId, schoolId])
@@ -2106,7 +2102,6 @@ model AdmissionNumberSequence {
 model StudentAdmissionIdentity {
   id               String   @id @default(uuid())
   accountId        String
-  account          Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
   schoolId         String
   branchId         String
   studentId        String
@@ -2114,6 +2109,7 @@ model StudentAdmissionIdentity {
   normalizedNumber String
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  account          Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@unique([accountId, studentId])
   @@unique([accountId, schoolId, branchId, normalizedNumber])
@@ -2121,8 +2117,8 @@ model StudentAdmissionIdentity {
 }
 
 model IdentityCardRegistry {
-  id          String                      @id @default(dbgenerated("gen_random_uuid()::text"))
-  publicId    String                      @unique @default(dbgenerated("gen_random_uuid()::text"))
+  id          String                      @id @default(dbgenerated("(gen_random_uuid())::text"))
+  publicId    String                      @unique @default(dbgenerated("(gen_random_uuid())::text"))
   accountId   String
   schoolId    String
   branchId    String
@@ -2143,7 +2139,7 @@ model IdentityCardRegistry {
 }
 
 model IdentityCardRegistryEvent {
-  id          String               @id @default(dbgenerated("gen_random_uuid()::text"))
+  id          String               @id @default(dbgenerated("(gen_random_uuid())::text"))
   cardId      String
   accountId   String
   eventType   String
@@ -2156,7 +2152,7 @@ model IdentityCardRegistryEvent {
 }
 
 model IdentityIssuancePolicy {
-  id                String   @id @default(dbgenerated("gen_random_uuid()::text"))
+  id                String   @id @default(dbgenerated("(gen_random_uuid())::text"))
   accountId         String
   schoolId          String
   branchId          String
@@ -2171,8 +2167,6 @@ model IdentityIssuancePolicy {
   @@unique([accountId, schoolId, branchId])
 }
 
-// Eleeveon Center E2EE public device directory. Private keys NEVER leave devices.
-// Support messages continue using PlatformFeedbackMessage.body as opaque ciphertext.
 model SupportEncryptionDevice {
   id                  String    @id @default(uuid())
   accountId           String
@@ -2193,8 +2187,6 @@ model SupportEncryptionDevice {
   @@index([accountId, userId, linkedAt])
 }
 
-// Eleeveon Center surveys: structured publishing and one response per invited user.
-// Answers are server-accessible for aggregation; do not describe surveys as E2EE.
 model EleeveonSurvey {
   id              String                   @id @default(uuid())
   title           String
@@ -2228,7 +2220,6 @@ model EleeveonSurveyResponse {
   @@index([accountId, submittedAt])
 }
 
-// Presence is short lived. No typing or recording content is persisted.
 model EleeveonSupportPresence {
   id         String   @id @default(uuid())
   feedbackId String
@@ -2242,7 +2233,6 @@ model EleeveonSupportPresence {
   @@index([feedbackId, expiresAt])
 }
 
-// WebRTC signalling metadata. Audio/video/screen pixels never go into PostgreSQL.
 model EleeveonSupportSignal {
   id         String   @id @default(uuid())
   feedbackId String
@@ -2272,24 +2262,24 @@ model EleeveonSupportDirectUpload {
   @@index([feedbackId, userId, messageId])
   @@index([expiresAt])
 }
-// Hub pairing: public keys only; pairing code is held as an HMAC, never plaintext.
+
 model SupportDeviceLink {
-  id                  String             @id @default(uuid())
-  accountId           String
-  userId              String
-  targetDeviceId      String
-  codeHash            String
-  challenge           String
-  deviceName          String?
-  status              String             @default("pending")
-  attemptCount        Int                @default(0)
-  approvedByDeviceId  String?
-  approvedAt          DateTime?
-  completedAt         DateTime?
-  expiresAt           DateTime
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
-  historyKeys         SupportHistoryKey[]
+  id                 String              @id @default(uuid())
+  accountId          String
+  userId             String
+  targetDeviceId     String
+  codeHash           String
+  challenge          String
+  deviceName         String?
+  status             String              @default("pending")
+  attemptCount       Int                 @default(0)
+  approvedByDeviceId String?
+  approvedAt         DateTime?
+  completedAt        DateTime?
+  expiresAt          DateTime
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  historyKeys        SupportHistoryKey[]
 
   @@index([accountId, userId, status])
   @@index([accountId, userId, codeHash, status])
@@ -2297,26 +2287,23 @@ model SupportDeviceLink {
   @@index([expiresAt])
 }
 
-// Opaque E2EE message-key rewraps, generated and signed on an existing device.
-// No plaintext message, attachment key, or private key belongs in this model.
 model SupportHistoryKey {
-  id                 String             @id @default(uuid())
-  linkId             String
-  conversationId     String
-  messageId          String
-  targetDeviceId     String
-  sourceDeviceId     String
-  wrappedKey         Json
-  signature          String
-  createdAt          DateTime           @default(now())
-  link               SupportDeviceLink  @relation(fields: [linkId], references: [id], onDelete: Cascade)
+  id             String            @id @default(uuid())
+  linkId         String
+  conversationId String
+  messageId      String
+  targetDeviceId String
+  sourceDeviceId String
+  wrappedKey     Json
+  signature      String
+  createdAt      DateTime          @default(now())
+  link           SupportDeviceLink @relation(fields: [linkId], references: [id], onDelete: Cascade)
 
   @@unique([messageId, targetDeviceId])
   @@index([targetDeviceId, conversationId])
   @@index([linkId])
 }
 
-// Rate-limits code guessing even when no guessed code corresponds to a link.
 model SupportPairingAttempt {
   id        String   @id @default(uuid())
   accountId String
@@ -2326,7 +2313,6 @@ model SupportPairingAttempt {
   @@index([userId, createdAt])
 }
 
-// Shared user setting across all Eleeveon Hub sections, not one per chat.
 model HubUserAppearance {
   userId         String   @id
   accountId      String
@@ -2348,4 +2334,101 @@ model HubBackgroundImage {
   createdAt  DateTime @default(now())
 
   @@index([accountId, userId])
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model backup_usoh_20261105_identity_admission_fix {
+  id               String?
+  accountId        String?
+  schoolId         String?
+  branchId         String?
+  studentId        String?
+  admissionNumber  String?
+  normalizedNumber String?
+  createdAt        DateTime?
+  updatedAt        DateTime?
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model backup_usoh_20261105_sequence_admission_fix {
+  id           String?
+  accountId    String?
+  schoolId     String?
+  branchId     String?
+  nextSequence Int?
+  createdAt    DateTime?
+  updatedAt    DateTime?
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model backup_usoh_20261105_student_admission_fix {
+  id        String?
+  accountId String?
+  tableName String?
+  localId   String?
+  cloudId   String?
+  deviceId  String?
+  version   Int?
+  updatedAt BigInt?
+  isDeleted Boolean?
+  payload   Json?
+  createdAt DateTime?
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model backup_usoh_deleted_students_20261104 {
+  id        String?
+  accountId String?
+  tableName String?
+  localId   String?
+  cloudId   String?
+  deviceId  String?
+  version   Int?
+  updatedAt BigInt?
+  isDeleted Boolean?
+  payload   Json?
+  createdAt DateTime?
+
+  @@ignore
+}
+
+model IndependentIdentityIssuer {
+  id             String   @id @default(uuid())
+  accountId      String
+  licenseId      String
+  installationId String
+  schoolId       String
+  branchId       String
+  schoolName     String
+  branchName     String   @default("")
+  publicKeyPem   String
+  status         String   @default("active")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  revocations IndependentIdentityRevocation[]
+
+  @@unique([licenseId, installationId, schoolId, branchId], name: "independentIssuerScope")
+  @@index([accountId])
+}
+
+model IndependentIdentityRevocation {
+  id           String   @id @default(uuid())
+  issuerId     String
+  credentialId String
+  revokedAt    DateTime @default(now())
+
+  issuer IndependentIdentityIssuer @relation(fields: [issuerId], references: [id], onDelete: Cascade)
+
+  @@unique([issuerId, credentialId])
 }

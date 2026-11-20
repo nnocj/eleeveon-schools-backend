@@ -2,12 +2,19 @@ import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from "@nest
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import type { AuthRequest } from "../common/auth-user";
 import { IdentityService } from "./identity.service";
+import { IndependentIdentityService } from "./independent-identity.service";
 import { IdentityPolicyDto, IdentityIssueDto, IdentityCardTargetDto } from "./identity.dto";
 
 @Controller("identity")
 @UseGuards(JwtAuthGuard)
 export class IdentityController {
-  constructor(private readonly identity: IdentityService) {}
+  constructor(private readonly identity: IdentityService, private readonly independent: IndependentIdentityService) {}
+
+  @Post("independent/issuer")
+  registerIndependentIssuer(@Req() req: AuthRequest, @Body() body: unknown) { return this.independent.register(req.user,body); }
+
+  @Post("independent/revoke")
+  revokeIndependent(@Req() req: AuthRequest, @Body() body: unknown) { return this.independent.revoke(req.user,body); }
 
   @Get("policy")
   policy(@Req() req: AuthRequest, @Query("schoolId") schoolId: string, @Query("branchId") branchId: string) {
@@ -34,8 +41,8 @@ export class IdentityController {
 // Public endpoint: no authentication, intentionally returns a minimal profile.
 @Controller("identity/verify")
 export class PublicIdentityController {
-  constructor(private readonly identity: IdentityService) {}
+  constructor(private readonly identity: IdentityService, private readonly independent: IndependentIdentityService) {}
   @Get(":token") verify(@Param("token") token: string) {
-    return this.identity.verify(token);
+    return token.startsWith("eid1.") ? this.independent.verify(token) : this.identity.verify(token);
   }
 }
