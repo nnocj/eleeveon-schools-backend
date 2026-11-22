@@ -51,6 +51,17 @@ export class AuthController {
     );
   }
 
+  /**
+   * Opt-in, additive discovery contract for unified Cloud/Independent routing.
+   * Not an authorization grant: protected APIs must validate entitlements
+   * and active memberships independently on every request.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get("deployment-context")
+  deploymentContext(@Req() req: AuthenticatedRequest) {
+    return this.authService.deploymentContext(req.user);
+  }
+
   @UseGuards(JwtAuthGuard)
   @Get("me")
   me(

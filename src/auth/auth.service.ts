@@ -413,6 +413,55 @@ export class AuthService {
     );
   }
 
+  /**
+   * Additive, read-only routing discovery. No schema change or license
+   * reconciliation occurs here. This endpoint is disabled by default.
+   */
+  async deploymentContext(actor: AuthenticatedSessionActor) {
+    if (this.config.get<string>("UNIFIED_DEPLOYMENT_CONTEXT_ENABLED") !== "true") {
+      throw new UnauthorizedException("Deployment discovery is not enabled.");
+    }
+    if (!actor?.id || !actor.accountId || actor.account?.status !== "active") {
+      throw new UnauthorizedException("Your session is no longer active.");
+    }
+    const entitlement = await this.entitlementResolver.resolveSnapshot(actor.accountId);
+    const memberships = (actor.memberships || []).filter(
+      (membership) => membership.active && membership.status === "active" &&
+        membership.accountId === actor.accountId,
+    );
+    if (!memberships.length) {
+      throw new UnauthorizedException("No active membership is available.");
+    }
+    return {
+      schemaVersion: 1,
+      accountId: actor.accountId,
+      userId: actor.id,
+      activeMembershipId: actor.activeMembershipId ?? null,
+      memberships: memberships.map((membership) => ({
+        id: membership.id,
+        role: membership.role,
+        schoolId: membership.schoolId,
+        branchId: membership.branchId,
+        teacherId: membership.teacherId,
+        isDefault: membership.isDefault,
+      })),
+      entitlement: entitlement ? {
+        status: entitlement.status,
+        source: entitlement.source,
+        licenseModel: entitlement.licenseModel,
+        deploymentMode: entitlement.deploymentMode,
+        syncPolicy: entitlement.syncPolicy,
+        planId: entitlement.planId ?? null,
+        perpetualLicenseId: entitlement.perpetualLicenseId ?? null,
+        features: entitlement.features,
+        version: entitlement.version,
+      } : null,
+      // Edition/teacher access must be derived from authoritative entitlements
+      // in the subsequent provisioning stage; do not infer from role alone.
+      routingReady: false,
+    };
+  }
+
   async me(
     actor: AuthenticatedSessionActor,
   ) {
