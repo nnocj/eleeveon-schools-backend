@@ -26,7 +26,7 @@ export class IndependentIdentityService {
     if (!validText(schoolName,140) || (branchName && !validText(branchName,140)) || !(typeof publicKeyPem === 'string' && publicKeyPem.length < 2000 && publicKeyPem.includes('BEGIN PUBLIC KEY'))) throw new BadRequestException('Invalid issuer information');
     let key; try {key = createPublicKey(publicKeyPem);} catch {throw new BadRequestException('Invalid public key');}
     if (key.asymmetricKeyType !== 'ed25519') throw new BadRequestException('Ed25519 public key required');
-    const current = await this.db.independentIdentityIssuer.findUnique({where:{independentIssuerScope:{licenseId,installationId,schoolId,branchId}}});
+    const current = await this.db.independentIdentityIssuer.findFirst({where:{licenseId,installationId,schoolId,branchId}});
     // Never silently replace a registered signing key: existing cards would become untrusted.
     if (current && current.publicKeyPem !== publicKeyPem) throw new ForbiddenException('Issuer already registered with another key; contact Eleeveon support for key rotation');
     if (current && current.status !== 'active') throw new ForbiddenException('Issuer is disabled');
