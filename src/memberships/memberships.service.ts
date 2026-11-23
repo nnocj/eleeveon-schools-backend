@@ -1099,13 +1099,33 @@ export class MembershipsService {
       );
     }
 
-    if (
-      existing.userId === actor.id &&
-      existing.active
-    ) {
-      throw new BadRequestException(
-        "You cannot remove your own active membership.",
-      );
+    if (existing.userId === actor.id && existing.active) {
+      // A user may hold several roles. Permit an account owner to remove
+      // their own *secondary* membership, but never the owner membership.
+      // Other self-removals remain blocked to avoid accidental lockout.
+      const actorIsOwner = this.normalizeMembershipRole(actor.role) === "super_admin";
+      const targetIsOwner = this.normalizeMembershipRole(existing.role) === "super_admin";
+      if (!actorIsOwner || targetIsOwner) {
+        throw new BadRequestException(
+          "You cannot remove this active membership from your own account.",
+        );
+      }
+      const ownerMembership = await this.prisma.userMembership.findFirst({
+        where: {
+          accountId: existing.accountId,
+          userId: actor.id,
+          role: "super_admin",
+          active: true,
+          status: "active",
+          id: { not: existing.id },
+        },
+        select: { id: true },
+      });
+      if (!ownerMembership) {
+        throw new ForbiddenException(
+          "A separate active Owner membership is required before removing your secondary role.",
+        );
+      }
     }
 
     const membership =
