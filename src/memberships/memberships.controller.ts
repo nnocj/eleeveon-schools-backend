@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { RolesGuard } from "../common/roles.guard";
 import { CreateMembershipDto, UpdateMembershipDto } from "./dto/membership.dto";
@@ -17,6 +17,11 @@ export class MembershipsController {
   @Get("account/:accountId")
   listForAccount(@Req() req: any, @Param("accountId") accountId: string) {
     return this.membershipsService.list(req.user, accountId);
+  }
+
+  @Get("account/:accountId/staff-lookup")
+  lookupExistingStaff(@Req() req: any, @Param("accountId") accountId: string, @Query("email") email: string) {
+    return this.membershipsService.lookupExistingStaffByEmail(req.user, accountId, email);
   }
 
   @Post()

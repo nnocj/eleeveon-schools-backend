@@ -4,6 +4,8 @@ import { PassportModule } from "@nestjs/passport";
 
 import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
+import { DurableSessionService } from "./durable-session.service";
+import { OfflineGrantService } from "./offline-grant.service";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { EntitlementsModule } from "../entitlements/entitlements.module";
 
@@ -23,6 +25,8 @@ import { EntitlementsModule } from "../entitlements/entitlements.module";
 
   providers: [
     AuthService,
+    DurableSessionService,
+    OfflineGrantService,
     JwtStrategy,
   ],
 

@@ -6,6 +6,7 @@ import { ConfigModule } from "@nestjs/config";
 import { PrismaModule } from "./prisma/prisma.module";
 import { AuthModule } from "./auth/auth.module";
 import { AccountsModule } from "./accounts/accounts.module";
+import { StaffInvitationsModule } from "./staff-invitations/staff-invitations.module";
 import { MembershipsModule } from "./memberships/memberships.module";
 import { PermissionsModule } from "./permissions/permissions.module";
 import { EntitlementsModule } from "./entitlements";
@@ -39,6 +40,7 @@ import { SupportModule } from "./support/support.module";
     AuthModule,
     AccountsModule,
     MembershipsModule,
+    StaffInvitationsModule,
     PermissionsModule,
     EntitlementsModule,
 

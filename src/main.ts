@@ -38,30 +38,26 @@ async function bootstrap() {
     }),
   );
 
-  /**
-   * Development-compatible CORS.
-   *
-   * `origin: true` reflects the requesting origin. This is suitable for your
-   * current localhost and deployed frontend setup when credentials are used.
-   * Later, production can be restricted to an explicit allowlist.
-   */
+  // Required for credentialed refresh cookies: never reflect arbitrary origins.
+  // Example: ELEEVEON_ALLOWED_FRONTEND_ORIGINS=https://schools.eleeveon.com,http://localhost:3000
+  const trustedOrigins = new Set(
+    (process.env.ELEEVEON_ALLOWED_FRONTEND_ORIGINS || "")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+  );
+  if (trustedOrigins.size === 0) {
+    throw new Error("ELEEVEON_ALLOWED_FRONTEND_ORIGINS must be configured before the API starts");
+  }
   app.enableCors({
-    origin: true,
+    origin: (origin, callback) => {
+      // Non-browser clients have no Origin header; JWT guards still protect APIs.
+      if (!origin || trustedOrigins.has(origin)) return callback(null, true);
+      return callback(new Error("CORS origin not permitted"), false);
+    },
     credentials: true,
-    methods: [
-      "GET",
-      "POST",
-      "PUT",
-      "PATCH",
-      "DELETE",
-      "OPTIONS",
-    ],
-    allowedHeaders: [
-      "Accept",
-      "Authorization",
-      "Content-Type",
-      "X-Device-Id",
-    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Accept", "Authorization", "Content-Type", "X-Device-Id"],
   });
 
   app.useGlobalPipes(

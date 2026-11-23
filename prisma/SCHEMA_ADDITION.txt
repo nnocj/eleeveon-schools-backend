@@ -1,0 +1,19 @@
+// Append to prisma/schema.prisma (or use the included complete patched schema)
+model StaffInvitation {
+  id String @id @default(uuid())
+  accountId String
+  email String
+  role String
+  schoolId String
+  branchId String
+  teacherId String?
+  tokenHash String @unique
+  createdByUserId String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  usedAt DateTime?
+  revokedAt DateTime?
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  @@index([accountId, email])
+  @@index([expiresAt])
+}

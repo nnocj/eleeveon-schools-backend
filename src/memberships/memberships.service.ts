@@ -27,10 +27,7 @@ const MEMBERSHIP_MANAGERS = new Set<string>([
 ]);
 
 const BRANCH_ASSIGNABLE_ROLES = new Set<string>([
-  "accountant",
   "teacher",
-  "student",
-  "parent",
 ]);
 
 type NullableId = string | number | null | undefined;
@@ -328,7 +325,7 @@ export class MembershipsService {
         membership.schoolId &&
         membership.branchId
       ) {
-        schoolIds.add(membership.schoolId);
+        // A branch administrator must not inherit every branch in a school.
         branchIds.add(membership.branchId);
       }
     }
@@ -452,7 +449,7 @@ export class MembershipsService {
 
     if (!BRANCH_ASSIGNABLE_ROLES.has(targetRole)) {
       throw new ForbiddenException(
-        "Branch administrators can only manage accountant, teacher, student, and parent memberships.",
+        "Branch administrators can only manage Teacher memberships.",
       );
     }
 
@@ -517,6 +514,26 @@ export class MembershipsService {
     }
   }
 
+  /** Exact-match lookup, restricted to the actor's own account and active managers. */
+  async lookupExistingStaffByEmail(actor: AuthUser, accountId: string, emailInput: string) {
+    this.assertManager(actor.role);
+    assertSameAccountOrDeveloper(actor, accountId);
+    const email = String(emailInput ?? "").trim().toLowerCase();
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new BadRequestException("Enter a valid staff email address.");
+    }
+    const scope = await this.managerScope(actor, accountId);
+    if (!scope.accountWide && scope.schoolIds.size === 0 && scope.branchIds.size === 0) {
+      throw new ForbiddenException("No active membership grants staff management.");
+    }
+    const user = await this.prisma.appUser.findFirst({
+      where: { accountId, email, active: true },
+      select: { id: true, fullName: true, email: true },
+    });
+    if (!user) throw new NotFoundException("No active Eleeveon user with this email belongs to this account.");
+    return user;
+  }
+
   async list(
     actor: AuthUser,
     accountId?: string,
@@ -558,8 +575,11 @@ export class MembershipsService {
       });
     }
 
+    const actorRole = this.normalizeMembershipRole(actor.role);
+    const branchOnly = actorRole === "branch_admin" && !scope.accountWide && scope.schoolIds.size === 0;
     const where: Prisma.UserMembershipWhereInput = {
       accountId: targetAccountId,
+      ...(branchOnly ? { role: "teacher" } : {}),
       ...(scope.accountWide
         ? {}
         : {
@@ -795,6 +815,14 @@ export class MembershipsService {
         : this.normalizeMembershipRole(
             existing.role,
           );
+
+    // Evaluate BOTH the existing and requested roles. Otherwise a branch
+    // administrator could demote a privileged record to teacher and modify it.
+    await this.assertRoleManagementAllowed(
+      actor,
+      existing.accountId,
+      this.normalizeMembershipRole(existing.role),
+    );
 
     await this.assertRoleManagementAllowed(
       actor,

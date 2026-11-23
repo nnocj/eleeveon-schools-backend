@@ -38,6 +38,8 @@ model Account {
   apiClients                   ApiClient[]
   apiKeys                      ApiKey[]
   payments                     AppPayment[]
+  staffInvitations             StaffInvitation[]
+  independentSchools           IndependentSchool[]
   users                        AppUser[]
   auditLogs                    AuditLog[]
   backgroundJobs               BackgroundJob[]
@@ -127,7 +129,7 @@ model UserSession {
   deviceName            String?
   ipAddress             String?
   userAgent             String?
-  expiresAt             DateTime
+  expiresAt             DateTime?
   revokedAt             DateTime?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
@@ -2431,4 +2433,185 @@ model IndependentIdentityRevocation {
   issuer IndependentIdentityIssuer @relation(fields: [issuerId], references: [id], onDelete: Cascade)
 
   @@unique([issuerId, credentialId])
+}
+
+model StaffInvitation {
+  id String @id @default(uuid())
+  accountId String
+  email String
+  role String
+  schoolId String
+  branchId String
+  teacherId String?
+  tokenHash String @unique
+  createdByUserId String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  usedAt DateTime?
+  revokedAt DateTime?
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  @@index([accountId, email])
+  @@index([expiresAt])
+}
+
+
+/// Minimal authorization registry. IDs are the exact local Dexie IDs, not new generated mappings.
+model IndependentSchool {
+  id String @id @default(uuid())
+  accountId String
+  name String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  branches IndependentBranch[]
+  @@unique([accountId, id])
+  @@index([accountId, status])
+}
+model IndependentBranch {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  name String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  school IndependentSchool @relation(fields: [accountId, schoolId], references: [accountId, id], onDelete: Restrict)
+  teachers IndependentTeacher[]
+  classes IndependentClass[]
+  subjects IndependentSubject[]
+  structures IndependentAcademicStructure[]
+  @@unique([accountId, schoolId, id])
+  @@index([accountId, schoolId, status])
+}
+model IndependentTeacher {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  displayName String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  branch IndependentBranch @relation(fields: [accountId, schoolId, branchId], references: [accountId, schoolId, id], onDelete: Restrict)
+  subjectAssignments IndependentTeacherAssignment[]
+  classTeacherAssignments IndependentClassTeacher[]
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, status])
+}
+model IndependentAcademicStructure {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  name String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  branch IndependentBranch @relation(fields: [accountId, schoolId, branchId], references: [accountId, schoolId, id], onDelete: Restrict)
+  periods IndependentAcademicPeriod[]
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, status])
+}
+model IndependentAcademicPeriod {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  academicStructureId String
+  name String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  structure IndependentAcademicStructure @relation(fields: [accountId, schoolId, branchId, academicStructureId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  subjectAssignments IndependentTeacherAssignment[]
+  classTeacherAssignments IndependentClassTeacher[]
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, academicStructureId])
+}
+model IndependentClass {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  name String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  branch IndependentBranch @relation(fields: [accountId, schoolId, branchId], references: [accountId, schoolId, id], onDelete: Restrict)
+  classSubjects IndependentClassSubject[]
+  classTeachers IndependentClassTeacher[]
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, status])
+}
+model IndependentSubject {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  name String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  branch IndependentBranch @relation(fields: [accountId, schoolId, branchId], references: [accountId, schoolId, id], onDelete: Restrict)
+  classSubjects IndependentClassSubject[]
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, status])
+}
+model IndependentClassSubject {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  classId String
+  subjectId String
+  status String @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  class IndependentClass @relation(fields: [accountId, schoolId, branchId, classId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  subject IndependentSubject @relation(fields: [accountId, schoolId, branchId, subjectId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  teacherAssignments IndependentTeacherAssignment[]
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, classId, subjectId])
+}
+/// Multiple rows per teacher; sourceLocalId maps to Dexie assignments.id.
+/// The classSubject FK ensures an assigned subject actually belongs to the class.
+model IndependentTeacherAssignment {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  teacherId String
+  classSubjectId String
+  academicPeriodId String?
+  status String @default("active")
+  revision Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  teacher IndependentTeacher @relation(fields: [accountId, schoolId, branchId, teacherId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  classSubject IndependentClassSubject @relation(fields: [accountId, schoolId, branchId, classSubjectId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  period IndependentAcademicPeriod? @relation(fields: [accountId, schoolId, branchId, academicPeriodId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, teacherId, status])
+  @@index([accountId, schoolId, branchId, classSubjectId, status])
+}
+/// Class-teacher responsibility is independent of subject teaching.
+model IndependentClassTeacher {
+  id String @id @default(uuid())
+  accountId String
+  schoolId String
+  branchId String
+  teacherId String
+  classId String
+  academicPeriodId String?
+  status String @default("active")
+  revision Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  teacher IndependentTeacher @relation(fields: [accountId, schoolId, branchId, teacherId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  class IndependentClass @relation(fields: [accountId, schoolId, branchId, classId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  period IndependentAcademicPeriod? @relation(fields: [accountId, schoolId, branchId, academicPeriodId], references: [accountId, schoolId, branchId, id], onDelete: Restrict)
+  @@unique([accountId, schoolId, branchId, id])
+  @@index([accountId, schoolId, branchId, teacherId, status])
+  @@index([accountId, schoolId, branchId, classId, status])
 }

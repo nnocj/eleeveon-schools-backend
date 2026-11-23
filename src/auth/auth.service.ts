@@ -462,6 +462,18 @@ export class AuthService {
     };
   }
 
+  /** Reissue access only after the caller has atomically rotated its refresh secret. */
+  async refreshForUser(userId: string) {
+    const user = await this.prisma.appUser.findUnique({
+      where: { id: userId },
+      include: { account: true, memberships: { where: { active: true, status: "active" } } },
+    });
+    if (!user || !user.active || user.account.status !== "active" || !user.memberships.length)
+      throw new UnauthorizedException("Membership or account no longer active");
+    const rows = await this.loadPermissionRevisionRows(user.accountId);
+    return this.buildSessionFromLoadedUser(user, rows, true);
+  }
+
   async me(
     actor: AuthenticatedSessionActor,
   ) {
@@ -772,7 +784,7 @@ export class AuthService {
                   secret:
                     this.jwtSecret(),
                   expiresIn:
-                    "30d",
+                    "15m",
                 },
               ),
           }
