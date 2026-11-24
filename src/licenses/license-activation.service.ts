@@ -32,7 +32,17 @@ export class LicenseActivationService {
    */
   async activate(dto: ActivateLicenseDto) {
     const keyRecord = await this.findByRawKey(dto.licenseKey);
-    const licenseId = keyRecord.id;
+    return this.activateById(keyRecord.id, dto);
+  }
+
+  async activateForOwner(licenseId: string, installationId: string, actor: AuthUser) {
+    if (!actor.memberships?.some(m => m.accountId === actor.accountId && m.active === true && m.status === 'active' && m.role === 'super_admin')) throw new ForbiddenException('Account owner required');
+    const license = await this.prisma.perpetualLicense.findFirst({where:{id:licenseId,accountId:actor.accountId,status:'active',deploymentMode:'offline_local',syncPolicy:'platform_only'}});
+    if (!license) throw new ForbiddenException('Independent license unavailable');
+    return this.activateById(license.id, {deviceId:installationId,machineFingerprint:installationId,platform:'browser-pwa',deviceName:'Eleeveon Schools PWA',appVersion:'1'}, actor.accountId);
+  }
+
+  private async activateById(licenseId: string, dto: Omit<ActivateLicenseDto, 'licenseKey'>, expectedAccountId?: string) {
     const fingerprintHash = this.crypto.fingerprintHash(dto.machineFingerprint);
     const activationToken = this.crypto.token();
     const now = new Date();
@@ -54,6 +64,7 @@ export class LicenseActivationService {
           },
         });
         if (!license) throw new NotFoundException("Perpetual licence not found.");
+        if (expectedAccountId && license.accountId !== expectedAccountId) throw new ForbiddenException("Account mismatch");
         if (license.status !== "active") {
           throw new BadRequestException(`Licence is ${license.status}.`);
         }
@@ -99,6 +110,7 @@ export class LicenseActivationService {
         const activation = await tx.licenseActivation.upsert({
           where: { licenseId_deviceId: { licenseId, deviceId: dto.deviceId } },
           update: {
+            installationId: dto.deviceId,
             deviceName: dto.deviceName,
             platform: dto.platform,
             appVersion: dto.appVersion,
@@ -113,6 +125,7 @@ export class LicenseActivationService {
             accountId: license.accountId,
             licenseId,
             deviceId: dto.deviceId,
+            installationId: dto.deviceId,
             deviceName: dto.deviceName,
             platform: dto.platform,
             appVersion: dto.appVersion,

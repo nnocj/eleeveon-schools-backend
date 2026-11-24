@@ -34,6 +34,12 @@ export class LicensesController {
     private readonly offlineCertificates: OfflineCertificateService,
   ) {}
 
+  @UseGuards(JwtAuthGuard)
+  @Post("provision-browser")
+  async provisionBrowser(@Body() body: { installationId: string }, @Req() request: AuthRequest) {
+    return this.offlineCertificates.provisionBrowser(body?.installationId, request.user, this.activations);
+  }
+
   /** Issue only after a settled Paystack-backed permanent ownership and authorized device activation. */
   @UseGuards(JwtAuthGuard)
   @Post(":id/offline-certificate")
