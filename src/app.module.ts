@@ -28,6 +28,8 @@ import { PublicWebsitesModule } from "./public-websites/public-websites.module";
 // Eleeveon Hub
 import { SupportModule } from "./support/support.module";
 
+import { DriveModule } from "./drive/drive.module";
+
 @Module({
   imports: [
     // Global environment configuration
@@ -37,6 +39,7 @@ import { SupportModule } from "./support/support.module";
 
     // Core platform
     PrismaModule,
+    DriveModule,
     AuthModule,
     AccountsModule,
     MembershipsModule,
